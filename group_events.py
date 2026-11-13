@@ -127,6 +127,16 @@ def _constant(value):
     raise EventError(f"Invalid JSON constant: {value}")
 
 
+def parse_event(text):
+    """Validate JSON text from disk or a Git blob with identical strict rules."""
+    try:
+        event = json.loads(text.lstrip('\ufeff'), object_pairs_hook=_pairs,
+                           parse_constant=_constant)
+    except (ValueError, UnicodeError) as exc:
+        raise EventError(f"Invalid JSON event: {exc}") from exc
+    return validate_event(event)
+
+
 def load_event(path):
     path = Path(path)
     try:

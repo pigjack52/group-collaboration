@@ -51,7 +51,7 @@ def repository_root(path):
     return Path(root)
 
 
-def inspect_status(path, canonical_branch="main"):
+def inspect_status(path, canonical_branch="main", *, allow_missing_upstream=False):
     """Inspect a working tree. Missing optional refs are represented by None."""
     root = repository_root(path)
     if not isinstance(canonical_branch, str) or not canonical_branch:
@@ -86,6 +86,11 @@ def inspect_status(path, canonical_branch="main"):
         upstream, _ = _git(root, "for-each-ref", "--format=%(upstream)",
                            "refs/heads/" + branch)
         upstream = upstream or None
+        if upstream:
+            _, exists = _git(root, 'show-ref', '--verify', '--quiet', upstream,
+                             allowed=(0, 1))
+            if exists and allow_missing_upstream:
+                upstream = None
         if upstream:
             counts, _ = _git(root, "rev-list", "--left-right", "--count",
                              "HEAD..." + upstream, "--")

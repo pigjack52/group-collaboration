@@ -1,5 +1,30 @@
 # Group Collaboration System
 
+## 步驟 3-6A：SYNC 安全發現
+
+執行 `.\groupctl.cmd sync --discover`。這是完整 SYNC 的發現階段，
+只 fetch origin 的分支到遠端追蹤 refs（含清除已刪除的遠端追蹤 refs），
+不整合程式碼、不更新本機分支、index 或工作檔案。
+fetch 不下載 tags、不遞迴子模組，使用明確 refspec，不使用設定中的額外映射。
+
+執行前顯示分支、HEAD、已暫存、未暫存及未追蹤清單。
+比較 canonical 與遠端分支的提交，從 canonical 及 people/* 分支的
+Git blob 讀取並嚴格驗證事件；不需要 checkout，也不要求本機存在事件檔案。
+報告來源分支、完整 tip SHA、事件完整 payload、HEAD 與 canonical ahead/behind。
+payload 中的 commit、測試及整合宣告仍須人工／AI 查核，不能當成已證實的事實。
+
+`.group/local/sync-discover.json` 是可刪除、可重建的本機已讀收據，
+成功掃描後以原子替換保存；刪除快取會重新報告仍在遠端分支上的事件。
+相同事件跨分支或重複執行不重複通知；歷史改寫、事件修改／刪除、
+同 ID 不同內容及同 change_id/question_id 多筆同類宣告都會警告，
+不選定勝出紀錄、不推定 blocker 已解決。
+任何錯誤或風險回傳 1，且不推進收據；乾淨完成回傳 0，參數錯誤為 2。
+沒有 origin、fetch 失敗、canonical 不存在、事件格式錯誤均明確報告。
+請勿同時執行多個 discovery 或其他修改 Repository 的工具。
+
+目前沒有 canonical 自動整合、衝突處理、語意審查或整合後測試，
+也未完成老師要求的完整 SYNC。自動化測試僅使用暫存 Repository 與本機 bare remote。
+
 AI-assisted collaboration through GitHub.
 
 ## 第一階段功能
