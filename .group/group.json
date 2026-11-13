@@ -1,0 +1,7 @@
+﻿{
+    "canonical_branch":  "main",
+    "repository":  "https://github.com/pigjack52/group-collaboration.git",
+    "group_id":  "group-01",
+    "protocol_version":  "0.1",
+    "assignment_file":  ".group/assignment/assignment.md"
+}
