@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 
 from group_events import EventError, load_event, read_event, list_events, write_event
+from group_git import GitError, repository_root, inspect_status, format_status
+from group_status import StatusError, collect_status, format_group_status
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
@@ -55,10 +57,30 @@ def main(argv=None):
     show = event_actions.add_parser("show", help="Read an event by ID")
     show.add_argument("event_id")
     event_actions.add_parser("list", help="List validated events in filename order")
+    git = commands.add_parser("git", help="Read-only local Git inspection")
+    git_actions = git.add_subparsers(dest="action", required=True)
+    git_actions.add_parser("status", help="Inspect local refs without fetching (not full STATUS)")
+    commands.add_parser('status', help='Analyze local group records without fetching (not full STATUS)')
     args = parser.parse_args(argv)
     # Resolve from the invocation directory, never from the installed tool.
     path = Path.cwd() / ".group" / "group.json"
     try:
+        if args.command == "status":
+            root = repository_root(Path.cwd())
+            config = load_config(root / ".group" / "group.json")
+            report = collect_status(root, config)
+            print(format_group_status(report))
+            return 0
+        if args.command == "git":
+            root = repository_root(Path.cwd())
+            config_path = root / ".group" / "group.json"
+            canonical = load_config(config_path)["canonical_branch"] if config_path.exists() else "main"
+            status = inspect_status(root, canonical)
+            print(format_status(status))
+            if status.canonical_commit is None:
+                print(f"groupctl: error: Canonical branch {canonical!r} unavailable", file=sys.stderr)
+                return 1
+            return 0
         if args.command == "config":
             result = load_config(path)
         elif args.action in ("validate", "create"):
@@ -69,7 +91,7 @@ def main(argv=None):
             result = read_event(Path.cwd(), args.event_id)
         else:
             result = list_events(Path.cwd())
-    except (ConfigError, EventError) as exc:
+    except (ConfigError, EventError, GitError, StatusError) as exc:
         print(f"groupctl: error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, ensure_ascii=True))

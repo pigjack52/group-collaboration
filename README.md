@@ -138,3 +138,70 @@ commit ? related_events ?????????????????????????
 ```powershell
 python -B -m unittest discover -s tests -v
 ```
+
+## 步驟 3-5A：唯讀 Git 狀態檢查
+
+需要 Git 與 Python 3.10 以上版本：
+
+```powershell
+.\groupctl.cmd git status
+python -B groupctl.py git status
+```
+
+可在工作樹子目錄執行；從 Repository 根目錄讀取 .group/group.json，
+若沒有設定檔則 canonical branch 預設為 main。既有設定檔有錯時會回報錯誤。
+
+group_git.py 提供 inspect_status() 與 GitStatus，回傳目前分支（detached HEAD 為 None）、
+完整 HEAD SHA、已暫存／未暫存／未追蹤檔案、origin 是否存在、upstream、
+ahead／behind 與 canonical ref／commit。Canonical 優先使用
+refs/remotes/origin/<canonical_branch>，其次使用 refs/heads/<canonical_branch>，
+輸出明示來源。忽略檔案不列入 dirty；衝突會依 Git index/worktree 狀態列入清單。
+
+所有遠端資訊只來自本機 refs，可能過時，不能當成 GitHub 即時狀態。
+指令不執行 fetch、pull、merge、rebase、checkout、commit 或 push，
+停用 Git optional locks 與 partial-clone lazy fetch。多次唯讀查詢並非原子快照，
+請避免同時以其他工具修改 Repository。
+
+缺少 origin 或未設定 upstream 會明確顯示，ahead／behind 不可用時不以零冒充。
+找不到 canonical branch 會顯示可取得的狀態並回傳 1。
+已設定但無法解析的 upstream、沒有 HEAD commit、非 Git 工作樹、
+Git 不存在／失敗／逾時及無效設定也會回傳 1。
+成功為 0；參數錯誤為 2。
+
+這只是 Git 基礎檢查，尚未實作完整 STATUS 程序：不更新遠端 metadata、
+不整理事件、身分、測試證據、blockers 或建議行動，也不實作 SYNC／PUB／INT／FINAL。
+新增測試僅在暫存 Git Repository 建立 fixture，不連線 GitHub。
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
+## 步驟 3-5B：群組 STATUS 本機分析層
+
+執行 .\groupctl.cmd status 或 python -B groupctl.py status。
+可從工作樹子目錄執行；群組設定必須存在於 Repository 根目錄的 .group/group.json。
+
+輸出包含群組、canonical branch、Git 快照、成員、完整事件清單、
+各類事件數量，以及利用 change_id、related_events（含間接關聯）
+或完全相同 commit 字串整理的變更證據清單。
+所有事件列出 ID、作者、時間與 payload，便於追查不同或矛盾的宣告。
+未取得資料會顯示 unknown 或 not yet recorded。
+
+成員必要欄位為 protocol_version、person_id、display_name、joined_at；
+驗證非空字串、版本 0.1、檔名與 person_id 相符，以及含時區的日期時間。
+事件沿用既有驗證器；資料錯誤或 Git 查詢失敗回傳 1 並附來源路徑或 Git 指令。
+成員清單為空、canonical ref 不存在、缺漏的事件關聯、未登錄作者、
+找不到發布紀錄的 change_id 或重複 change_id 會明確警告，部分資料報告仍回傳 0。
+參數錯誤回傳 2。
+
+這不是完整 STATUS 工程程序，不執行 fetch 或任何 Git 寫入操作。
+遠端 refs 僅為本機快照，可能過時。事件清單包含本機未提交檔案，
+不保證已發布到 GitHub。成員清單不能證明目前操作者身分。
+review accept 不代表已整合；integration_result 只是事件宣告，
+尚未以 Git ancestry 驗證是否進入 HEAD 或 canonical。
+test_result 僅適用其記錄的 commit 與 scope，不延伸至關聯事件或其他 commit；
+HEAD/canonical 測試對應使用完整字串相等，縮寫 SHA 不自動推定相同。
+不以時間、事件數量或較晚事件推定 blocker 已解決，也不挑選單一紀錄掩蓋矛盾。
+
+暫存 Repository 測試涵蓋空事件、各類工程證據、缺少整合證據、
+非法成員／事件、缺失關聯、dirty、upstream、唯讀性及非 Git 目錄。
