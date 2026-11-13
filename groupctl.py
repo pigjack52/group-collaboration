@@ -8,6 +8,7 @@ from group_events import EventError, load_event, read_event, list_events, write_
 from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
+from group_update import update
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
@@ -63,14 +64,17 @@ def main(argv=None):
     git_actions.add_parser("status", help="Inspect local refs without fetching (not full STATUS)")
     commands.add_parser('status', help='Analyze local group records without fetching (not full STATUS)')
     sync = commands.add_parser('sync', help='Fetch and discover remote records; no integration')
-    sync.add_argument('--discover', action='store_true', required=True)
+    modes = sync.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--discover', action='store_true')
+    modes.add_argument('--update', action='store_true')
     args = parser.parse_args(argv)
     # Resolve from the invocation directory, never from the installed tool.
     path = Path.cwd() / ".group" / "group.json"
     try:
         if args.command == 'sync':
             root = repository_root(Path.cwd())
-            return discover(root, load_config(root / '.group' / 'group.json'))
+            operation = update if args.update else discover
+            return operation(root, load_config(root / '.group' / 'group.json'))
         if args.command == "status":
             root = repository_root(Path.cwd())
             config = load_config(root / ".group" / "group.json")

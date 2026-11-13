@@ -1,5 +1,36 @@
 # Group Collaboration System
 
+## 步驟 3-6C：SYNC 安全更新
+
+執行 `.\groupctl.cmd sync --update` 或 `python -B groupctl.py sync --update`。
+與 `--discover` 互斥；兩者是完整 SYNC 的不同階段，更新不替代事件發現與 AI 審查。
+只從 `.group/group.json` 的 canonical branch fetch 到 origin 遠端追蹤 ref，
+不整合任何個人遠端分支，不修改 canonical 本機分支，不自動 Commit 或 Push。
+請避免同時使用其他工具修改此 Repository。
+
+操作前輸出分支、HEAD、index／worktree／untracked 清單及快取 canonical SHA；
+fetch 後輸出精確來源 SHA 與目標 HEAD。僅接受乾淨的 `people/<person_id>/<topic>`
+分支，拒絕 detached HEAD、canonical、其他分支及未完成的 Git 操作。
+所有非忽略的未追蹤檔案都阻擋更新；不偷偷 stash、reset 或 clean。
+
+直線歷史採 `merge --ff-only`；分歧歷史採 `merge --no-commit --no-ff`，
+合併成功仍保持待提交並回傳 1，HEAD 不變，不能宣稱 canonical 已納入歷史。
+請先檢閱 diff、測試與語意，再由人決定是否提交；本命令不代為提交。
+衝突保留現場、列出檔案並回傳 1；進一步編輯前可用 `git merge --abort`
+取消待提交 merge。已完成 fast-forward 後測試失敗不自動回退，保留結果供診斷。
+
+更新後用 Git ancestry 驗證來源是否納入，輸出前後 SHA、incoming diff、
+受影響檔案、提交摘要及合併後 diff，供 AI 比對個人變更、介面與假設。
+機械檢查包含 `git diff --check` 與本專案的
+`python -B -m unittest discover -s tests -v`（120 秒上限）。
+沒有 `tests/test*.py`、零測試、測試失敗／逾時或待提交 merge 均回傳 1。
+其他測試框架／建置目前須由 AI 或人另行執行；測試程式會在更新後的工作樹執行，
+應只對可信任的 canonical 使用此操作。
+回傳 0 表示已納入且快速驗證通過，或已納入而不需更新；
+重複無更新不重跑測試，不宣稱目前測試證據仍有效。參數錯誤回傳 2。
+輸出明確標示語意審查尚未執行；仍須判斷介面相容性、行為及測試充分性。
+本機輸出不是已發布的 collaboration event；此階段不建立或發布事件。
+
 ## 步驟 3-6A：SYNC 安全發現
 
 執行 `.\groupctl.cmd sync --discover`。這是完整 SYNC 的發現階段，
