@@ -9,6 +9,7 @@ from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
+from group_test import run_tests
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
@@ -67,10 +68,18 @@ def main(argv=None):
     modes = sync.add_mutually_exclusive_group(required=True)
     modes.add_argument('--discover', action='store_true')
     modes.add_argument('--update', action='store_true')
+    test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
+    test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
     args = parser.parse_args(argv)
     # Resolve from the invocation directory, never from the installed tool.
     path = Path.cwd() / ".group" / "group.json"
     try:
+        if args.command == 'test':
+            # Stable Chinese output when redirected from Windows PowerShell.
+            if hasattr(sys.stdout, 'reconfigure'):
+                sys.stdout.reconfigure(encoding='utf-8')
+            root = repository_root(Path.cwd())
+            return run_tests(root, load_config(root / '.group' / 'group.json'), args.person_id)
         if args.command == 'sync':
             root = repository_root(Path.cwd())
             operation = update if args.update else discover

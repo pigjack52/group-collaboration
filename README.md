@@ -1,5 +1,67 @@
 # Group Collaboration System
 
+## 步驟 3-7B：TEST 最小本機機械支援
+
+```powershell
+.\groupctl.cmd test --person-id student01
+python -B groupctl.py test --person-id student01
+```
+
+`--person-id` 必填，必須存在於 `.group/members/<person_id>.json`；不從
+Git user.name 或分支名稱推定身分。可從 Repository 子目錄執行。
+第一版只驗證目前分支的乾淨 HEAD，不接受 scope、canonical 或變更 ID。
+拒絕 detached／無 HEAD、staged、unstaged、非忽略 untracked、未完成 Git 操作，
+以及可能隱藏變更的 assume-unchanged／skip-worktree index flags。
+
+使用目前 Python 解譯器、`-B` 與固定內部 unittest runner，執行
+`unittest.defaultTestLoader.discover('tests')`，以 verbosity 2 執行；上限 120 秒。
+不接受任意 shell 命令。測試本身仍是會執行的專案 Python 程式，請使用可信任的測試。
+執行前後檢查分支、完整 HEAD、Git 工作目錄狀態及未完成操作；請勿同時編輯或操作 Git。
+這是前後快照檢查，不是隔離沙箱，無法證明期間改動後又還原的內容未影響執行；
+忽略檔案與外部環境也不由 commit 完整描述。
+
+每次建立新的 `.group/events/<event_id>.json`，沿用既有驗證器與獨占建立，
+不覆寫既有事件。事件的 commit 是受測 HEAD，不是未來提交事件的 commit。
+建立事件本身通常會新增 untracked 檔案，使工作目錄變 dirty；再次執行會安全拒絕，
+請先由人檢閱並依既有工程程序處理事件，不要為重跑而覆寫或刪除紀錄。
+輸出「本機事件已建立，尚未 Commit／Push」；不自動執行 Fetch、Add、Commit、
+Push、Merge、Checkout、Reset 或 Clean，不能據此宣稱已上傳 GitHub。
+
+結果政策：有成功案例且全部正常完成為 `pass`；assertion failure、error 或
+unexpected success 為 `fail`；只有 skip、逾時、或執行後 Git 驗證失效為 `partial`；
+零測試、缺少 tests、無法啟動或無有效計數為 `not_available`。
+同一測試方法的多個失敗 subtest 只計一個 failed；expected failure 計入 skipped，
+一個案例同時有 skip 與失敗時以 failed 優先。class/module fixture 錯誤造成
+無法完整對應案例計數時保留診斷並回報 unavailable，不偽造計數或 pass。
+只有 pass 且事件成功建立回傳 0；失敗、證據不完整、前置拒絕或寫入失敗回傳 1；
+參數錯誤回傳 2。失敗或驗證失效仍盡可能建立真實事件，不自動回復測試造成的變更。
+
+`execution` 是 specs/03 §14 允許的**選用實作擴充**，未新增正式必填欄位。
+包含遮蔽路徑的實際 argv、branch、退出碼、計數是否可用、狀態驗證及輸出尾段（最多 12000 字元）；
+summary 保留必要診斷。計數不可用時整數欄位為 0，搭配 counts_available=false
+與非 pass 結果表示未知，不能讀成實際測了零個失敗。
+stdout/stderr 合併供診斷，非完整持久 log；臨時結果檔執行後移除。
+
+步驟 3-7C-1：`commands` 保留實際內部 runner 的參數順序與旗標，
+路徑運算元以 `<python-executable>`、`<group-test-runner>`、`<temporary-result-json>`
+明確遮蔽，並非可直接貼上執行的 shell 命令。`execution.command_representation` 說明此表示法，
+`path_roles` 解釋各代號；`cwd` 是 Repository 根目錄。`started=false` 表示沒有啟動證據，
+缺少 tests 或啟動失敗時 `commands=[]`；逾時仍保留已啟動的命令。
+不保存原始私人 argv；summary、輸出與錯誤中的已知 Repository、工具、Python、家目錄及
+暫存結果路徑也會遮蔽，保留相對檔名與錯誤診斷。這不是任意測試輸出的通用秘密偵測器。
+
+選用 `reproduction` 提供從獨立 checkout 的受測 commit 根目錄執行
+`python -B -m unittest discover -s tests -v` 的等價操作（必要時改用 python3）。
+此指令使用相同 discovery 與 verbosity，不建立 TEST 事件；不是本次實際執行的命令，
+也不包含內部 runner 的逐案例計數政策、120 秒期限及 Git 狀態檢查。
+這兩個擴充依 specs/03 §14 添加，不改變必填欄位語意或老師的 specs。
+
+此命令不完成整套 TEST：尚未支援其他 scope、自動探索 build/lint/UI、
+失敗根因調查、AI 語意審查、人工檢查規劃及事件發布。
+`human_checks_required=[]` 表示本機 helper 尚未提出人工項目，不代表不需要人工檢查。
+自動測試通過只證明本次 unittest 觀察，不證明測試充分或語意正確。
+功能驗證使用暫存 Git Repository；不要為驗證此功能在正式 Repository 建立測試事件。
+
 ## 步驟 3-6C：SYNC 安全更新
 
 執行 `.\groupctl.cmd sync --update` 或 `python -B groupctl.py sync --update`。
