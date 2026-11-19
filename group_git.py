@@ -51,17 +51,18 @@ def repository_root(path):
     return Path(root)
 
 
-def inspect_status(path, canonical_branch="main", *, allow_missing_upstream=False):
+def inspect_status(path, canonical_branch="main", *, allow_missing_upstream=False,
+                   status_config=(), submodules="none"):
     """Inspect a working tree. Missing optional refs are represented by None."""
     root = repository_root(path)
     if not isinstance(canonical_branch, str) or not canonical_branch:
         raise GitError("canonical_branch must be a non-empty branch name")
     _git(root, "check-ref-format", "refs/heads/" + canonical_branch)
-    branch, code = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD", allowed=(0, 1))
-    branch = branch if code == 0 else None
+    branch_ref, _ = _git(root, "symbolic-ref", "--quiet", "HEAD", allowed=(0, 1))
+    branch = branch_ref.removeprefix("refs/heads/") if branch_ref.startswith("refs/heads/") else None
     head, _ = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
-    raw, _ = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                  "--ignore-submodules=none")
+    raw, _ = _git(root, *status_config, "status", "--porcelain=v1", "-z",
+                  "--untracked-files=all", "--ignore-submodules=" + submodules)
     staged, unstaged, untracked = [], [], []
     records = iter(raw.split("\0"))
     for record in records:

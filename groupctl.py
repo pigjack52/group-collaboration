@@ -10,6 +10,7 @@ from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
 from group_test import run_tests
+from group_pub import preflight
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
@@ -70,10 +71,18 @@ def main(argv=None):
     modes.add_argument('--update', action='store_true')
     test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
+    pub = commands.add_parser('pub', help='Read-only local publication preflight')
+    pub.add_argument('--preflight', action='store_true', required=True)
+    pub.add_argument('--person-id', required=True, help='Explicit configured member person_id')
     args = parser.parse_args(argv)
     # Resolve from the invocation directory, never from the installed tool.
     path = Path.cwd() / ".group" / "group.json"
     try:
+        if args.command == 'pub':
+            root = repository_root(Path.cwd())
+            report = preflight(root, load_config(root / '.group' / 'group.json'), args.person_id)
+            print(json.dumps(report, indent=2, ensure_ascii=True))
+            return int(bool(report['blockers']))
         if args.command == 'test':
             # Stable Chinese output when redirected from Windows PowerShell.
             if hasattr(sys.stdout, 'reconfigure'):

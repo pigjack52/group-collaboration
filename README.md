@@ -1,5 +1,23 @@
 # Group Collaboration System
 
+## 步驟 3-8B：PUB 唯讀預檢
+
+在 Repository 內執行 `python -B groupctl.py pub --preflight --person-id student01`
+或 `.\groupctl.cmd pub --preflight --person-id student01`，並以已登錄的成員 ID 取代範例值。
+JSON 的 `facts` 顯示本機 Git 和身分資料，`blockers` 列出阻擋原因，`review_required`
+和 `unverified` 說明待審閱與尚未確認的證據。退出碼 `0` 表示本機檢查未發現阻擋項，
+仍須審閱實際貢獻。`1` 表示預檢受阻或無法完成，`2` 表示參數錯誤。
+
+staged、unstaged、untracked 與已提交的淨變更路徑供審閱。`comparison` 使用可取得的
+本機 upstream，否則使用本機可見的 canonical ref，並指出比較來源與 SHA。
+淨變更清單不包含已變更又還原的路徑，需另閱 `history_range` 中實際提交的 diff。
+本機 ref 可能過時。操作期間請避免同時編輯或執行其他 Git 操作。
+
+預檢停用外部 Git filters 及 fsmonitor，使用 filter 的路徑可能與平常的 Git 狀態判定不同。
+子模組回報 superproject 可見的 gitlink 狀態，子模組工作樹需另行審閱。
+此階段只蒐集本機證據，遠端狀態、權限、秘密與測試結果均待確認。
+預檢不選擇提交範圍、不執行測試、不修改 Git 狀態或建立事件，也不執行完整 PUB。
+
 ## 步驟 3-7D-2D：STATUS 的 TEST 證據
 
 在 Repository 執行 `python -B groupctl.py status`。完整原始事件仍列在
