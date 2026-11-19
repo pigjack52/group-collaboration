@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +79,14 @@ class TestCommandTests(unittest.TestCase):
         self.assertTrue(event['execution']['successful'])
         self.assertTrue(event['execution']['state_verified'])
         self.assertEqual(event['execution']['ran'], 1)
+        evidence = event['execution']
+        self.assertEqual(evidence['counts'], dict(status='observed', ran=1, passed=1, failed=0, skipped=0))
+        self.assertEqual(evidence['environment']['python_version'], platform.python_version())
+        self.assertEqual(evidence['environment']['os_system'], platform.system())
+        self.assertEqual(evidence['environment']['framework'], 'unittest')
+        self.assertRegex(evidence['environment']['runner_sha256'], r'^[a-f0-9]{64}$')
+        self.assertEqual(evidence['diagnostics']['entries'], [])
+        self.assertFalse(evidence['output']['summary_truncated'])
         self.assertIn('redacted', event['execution']['command_representation'])
         self.assertIn('本機事件已建立，尚未 Commit／Push', result.stdout)
         self.assertIn('NOT PERFORMED', result.stdout)
@@ -93,6 +102,11 @@ class TestCommandTests(unittest.TestCase):
         event, = self.events()
         self.assertEqual((event['automated_result'], event['passed'], event['failed']), ('fail', 0, 1))
         self.assertIn('AssertionError', event['summary'])
+        entry, = event['execution']['diagnostics']['entries']
+        self.assertEqual(entry, dict(kind='assertion_failure',
+                                     test_id='test_example.Example.test_example',
+                                     exception_type='builtins.AssertionError',
+                                     message='1 != 2', truncated_fields=[]))
 
     def test_error(self):
         self.suite("raise RuntimeError('fixture error')")
@@ -100,12 +114,17 @@ class TestCommandTests(unittest.TestCase):
         event, = self.events()
         self.assertEqual((event['automated_result'], event['failed']), ('fail', 1))
         self.assertIn('RuntimeError', event['summary'])
+        entry, = event['execution']['diagnostics']['entries']
+        self.assertEqual((entry['kind'], entry['exception_type'], entry['message']),
+                         ('error', 'builtins.RuntimeError', 'fixture error'))
 
     def test_skip_only_is_partial(self):
         self.suite("self.skipTest('fixture skip')")
         self.assertEqual(self.cli('--person-id', 'P01').returncode, 1)
         event, = self.events()
         self.assertEqual((event['automated_result'], event['skipped']), ('partial', 1))
+        self.assertEqual(event['execution']['counts']['skipped'], 1)
+        self.assertEqual(event['execution']['diagnostics']['total'], 0)
 
     def test_zero_tests(self):
         (self.root / 'tests/test_example.py').write_text('# empty\n', encoding='utf-8')
@@ -115,6 +134,8 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(event['automated_result'], 'not_available')
         self.assertEqual(event['passed'], 0)
         self.assertIn('Zero tests', event['summary'])
+        self.assertEqual(event['execution']['counts'],
+                         dict(status='observed', passed=0, failed=0, skipped=0, ran=0))
 
     def test_cannot_start(self):
         with patch('group_test.execute', side_effect=OSError('cannot start fixture')):
@@ -124,16 +145,25 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(event['automated_result'], 'not_available')
         self.assertFalse(event['execution']['counts_available'])
         self.assertFalse(event['execution']['started'])
+        self.assertEqual(event['execution']['counts']['status'], 'unavailable')
+        self.assertIsNone(event['execution']['counts']['ran'])
+        self.assertIsNone(event['execution']['environment'])
         self.assertEqual(event['commands'], [])
         self.assertIn('cannot start fixture', event['summary'])
 
     def test_timeout(self):
-        with patch('group_test.execute', side_effect=subprocess.TimeoutExpired('python', 120)):
+        self.suite("import time; print('before timeout', flush=True); time.sleep(20)")
+        with patch('group_test.TIMEOUT', 3):
             code, _ = self.direct()
         self.assertEqual(code, 1)
         self.assertEqual(self.events()[0]['automated_result'], 'partial')
         self.assertFalse(self.events()[0]['execution']['completed'])
         self.assertIn('timeout', self.events()[0]['summary'])
+        evidence = self.events()[0]['execution']
+        self.assertEqual(evidence['counts']['status'], 'unknown')
+        self.assertIsNone(evidence['counts']['ran'])
+        self.assertIsNone(evidence['diagnostics'])
+        self.assertIn('before timeout', evidence['output']['stdout']['tail'])
 
     def test_contradictory_runner_results(self):
         cases = ((1, True, 1, 'fail'), (1, False, 0, 'fail'),
@@ -169,6 +199,8 @@ class TestCommandTests(unittest.TestCase):
                 event = json.JSONDecoder().raw_decode(output)[0]
                 self.assertEqual(event['automated_result'], 'not_available')
                 self.assertFalse(event['execution']['counts_available'])
+                self.assertEqual(event['execution']['counts'],
+                                 dict(status='unknown', passed=None, failed=None, skipped=None, ran=None))
                 self.commit(f'invalid counts fixture {index}')
 
     def test_runner_exit_without_result(self):
@@ -177,6 +209,52 @@ class TestCommandTests(unittest.TestCase):
         event, = self.events()
         self.assertEqual(event['automated_result'], 'not_available')
         self.assertEqual(event['execution']['returncode'], 7)
+        self.assertEqual(event['execution']['counts']['status'], 'unknown')
+
+    def test_runner_exception_preserves_environment_and_diagnostic(self):
+        (self.root / 'tests/test_example.py').write_text(
+            'def load_tests(*args):\n'
+            ' class BrokenSuite:\n'
+            '  def __call__(self, result): raise RuntimeError("suite escaped runner")\n'
+            ' return BrokenSuite()\n', encoding='utf-8')
+        self.commit('fixture runner exception')
+        self.assertEqual(self.direct()[0], 1)
+        event, = self.events()
+        evidence = event['execution']
+        self.assertEqual(event['automated_result'], 'not_available')
+        self.assertEqual(evidence['counts']['status'], 'unknown')
+        self.assertEqual(evidence['environment']['framework'], 'unittest')
+        entry, = evidence['diagnostics']['entries']
+        self.assertEqual((entry['kind'], entry['test_id'], entry['message']),
+                         ('runner_error', None, 'suite escaped runner'))
+
+    def test_output_and_diagnostics_limits_after_redaction(self):
+        self.suite(
+            "import sys\n"
+            "  print('a' * 12001 + 'stdout end')\n"
+            "  print('b' * 12001 + 'stderr end', file=sys.stderr)\n"
+            "  for i in range(52):\n"
+            "   with self.subTest(i=i):\n"
+            "    self.fail(str(__file__) + ' ' + 'c' * 2200)"
+        )
+        self.assertEqual(self.direct()[0], 1)
+        event, = self.events()
+        evidence = event['execution']
+        self.assertEqual(event['failed'], 1)
+        for stream in ('stdout', 'stderr'):
+            output = evidence['output'][stream]
+            self.assertTrue(output['truncated'])
+            self.assertEqual(len(output['tail']), evidence['output']['char_limit'])
+        self.assertTrue(evidence['output']['combined_truncated'])
+        self.assertTrue(evidence['output']['summary_truncated'])
+        diagnostics = evidence['diagnostics']
+        self.assertEqual((diagnostics['total'], len(diagnostics['entries'])), (52, 50))
+        self.assertTrue(diagnostics['entries_truncated'])
+        first = diagnostics['entries'][0]
+        self.assertIn('(i=0)', first['test_id'])
+        self.assertIn('<repository>', first['message'])
+        self.assertEqual(len(first['message']), diagnostics['char_limit'])
+        self.assertEqual(first['truncated_fields'], ['message'])
 
     def test_no_success_callback_cannot_pass(self):
         (self.root / 'tests/test_example.py').write_text(
@@ -321,6 +399,8 @@ class TestCommandTests(unittest.TestCase):
                 self.assertFalse(event['execution']['state_verified'])
                 self.assertIn('attribution of the observations is unverified', event['summary'])
                 self.assertIn('observed fixture failure', event['execution']['output_tail'])
+                self.assertEqual(event['execution']['diagnostics']['entries'][0]['message'],
+                                 'observed fixture failure')
                 self.commit('retain fixture evidence')
 
     def test_only_read_only_git_commands(self):
@@ -386,7 +466,7 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(len(self.events()), 1)
 
     def test_failure_logs_hide_known_local_paths_and_keep_diagnostics(self):
-        self.suite("self.assertEqual(1, 2)")
+        self.suite(r'''self.fail(str(__file__) + r' "D:\Private User\fixture.log" /home/fixture-user/tmp.log')''')
         actual = group_test.execute
         observed = []
         def logging(command, root):
@@ -404,6 +484,11 @@ class TestCommandTests(unittest.TestCase):
             self.assertNotIn(path.replace('\\', '/'), serialized)
         self.assertIn('AssertionError', event['execution']['output_tail'])
         self.assertIn('tests', event['execution']['output_tail'])
+        diagnostic = event['execution']['diagnostics']['entries'][0]['message']
+        self.assertIn('<repository>', diagnostic)
+        self.assertIn('"<absolute-path>" <absolute-path>', diagnostic)
+        self.assertNotIn('Private User', serialized)
+        self.assertNotIn('fixture-user', serialized)
         self.assertEqual((event['commit'], event['failed'], event['execution']['returncode']),
                          (self.head, 1, 1))
 

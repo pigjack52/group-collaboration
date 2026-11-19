@@ -46,18 +46,38 @@ STATUS 會個別顯示這類紀錄；事件讀取與 SYNC 沿用既有協定驗�
 
 `execution` 是 specs/03 §14 允許的**選用實作擴充**，未新增正式必填欄位。
 包含遮蔽路徑的實際 argv、branch、是否啟動與完成、退出碼、runner 的 `successful`、
-計數是否可用、有效時的執行數 `ran`、狀態驗證及輸出尾段（最多 12000 字元）；
-summary 保留必要診斷。計數不可用時整數欄位為 0，搭配 counts_available=false
-與非 pass 結果表示未知，不能讀成實際測了零個失敗。
-stdout/stderr 合併供診斷，非完整持久 log；臨時結果檔執行後移除。
+計數是否可用、有效時的執行數 `ran`、狀態驗證及合併輸出尾段 `output_tail`。
+臨時結果檔執行後移除。
+
+步驟 3-7D-2B 在 `execution` 加入以下執行證據。
+
+- `environment` 由 runner 回報 Python 實作與版本、作業系統名稱與發行版本、框架名稱及
+  可取得的獨立版本，以及內部 runner 程式碼的 SHA-256 識別值。標準函式庫的
+  unittest 通常沒有獨立版本欄位，此時為 `null`，以 Python 版本提供重現線索。
+- `counts` 以 `observed` 標示有效計數（包含實際零），以 `unknown` 標示已啟動但沒有
+  有效計數，以 `unavailable` 標示未執行。後兩種狀態的數值為 `null`。正式整數欄位
+  保留既有的 0 相容表示，應搭配 `counts_available=false` 解讀。
+- `diagnostics` 記錄 unittest 回呼觀察到的 assertion failure、error、unexpected success，
+  以及逸出 runner 的例外。包含可取得的案例或 subtest 識別碼、例外型別與訊息。
+  依發生順序最多保留 50 筆，每個文字欄位保留遮蔽後前 2000 個 Unicode 字元。
+  `total` 是診斷筆數，subtest 可占多筆。`entries_truncated`、`truncated_fields`
+  與 `truncated` 標示省略情況。未取得 runner 回報時，環境及診斷使用 `null`。
+- `output` 分別保留 stdout、stderr 去識別後最後 12000 個 Unicode 字元，
+  並各自標示 `truncated`。`output_tail` 沿用 stdout 接 stderr 的順序，保留最後
+  12000 字元，`combined_truncated` 標示是否截斷。事件摘要中的輸出部分保留合併後
+  最後 2000 字元，由 `summary_truncated` 標示。逾時保留子程序已擷取的部分輸出。
+
+這些資料用於重現與定位失敗。例外類型只描述 runner 觀察到的結果，無法確認是產品缺陷、
+測試錯誤、依賴或環境問題，也無法完整還原本機環境。AI 仍須調查失敗根因。
 
 步驟 3-7C-1：`commands` 保留實際內部 runner 的參數順序與旗標，
 路徑運算元以 `<python-executable>`、`<group-test-runner>`、`<temporary-result-json>`
 明確遮蔽，並非可直接貼上執行的 shell 命令。`execution.command_representation` 說明此表示法，
 `path_roles` 解釋各代號；`cwd` 是 Repository 根目錄。`started=false` 表示沒有啟動證據，
 缺少 tests 或啟動失敗時 `commands=[]`；逾時仍保留已啟動的命令。
-不保存原始私人 argv；summary、輸出與錯誤中的已知 Repository、工具、Python、家目錄及
-暫存結果路徑也會遮蔽，保留相對檔名與錯誤診斷。這不是任意測試輸出的通用秘密偵測器。
+原始私人 argv 會遮蔽。summary、輸出與診斷也會在截斷前遮蔽已知 Repository、工具、
+Python、家目錄及暫存路徑，並遮蔽可辨識的其他絕對路徑。已知位置會儘量保留相對檔名。
+任意輸出仍可能含有未辨識的路徑、帳號或秘密，事件發布前須檢閱內容。
 
 選用 `reproduction` 提供從獨立 checkout 的受測 commit 根目錄執行
 `python -B -m unittest discover -s tests -v` 的等價操作（必要時改用 python3）。

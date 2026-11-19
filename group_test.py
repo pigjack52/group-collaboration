@@ -1,8 +1,10 @@
 """Current clean HEAD unittest evidence; local only, not the full TEST procedure."""
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,12 +15,53 @@ from group_git import GitError, _git, inspect_status
 from group_status import read_members
 
 TIMEOUT = 120
+OUTPUT_LIMIT = 12000
+SUMMARY_LIMIT = 2000
+DIAGNOSTIC_LIMIT = 50
+DIAGNOSTIC_TEXT_LIMIT = 2000
+COUNT_FIELDS = ('passed', 'failed', 'skipped', 'ran')
 MARKERS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge',
            'rebase-apply', 'sequencer', 'BISECT_LOG')
 
 # Fixed code, never shell input. The separate result file avoids parsing test prose.
 RUNNER = r'''
-import json, sys, unittest
+import json, platform, sys, unittest
+
+environment = dict(
+    python_implementation=platform.python_implementation(),
+    python_version=platform.python_version(),
+    os_system=platform.system() or None,
+    os_release=platform.release() or None,
+    framework='unittest',
+    framework_version=getattr(unittest, '__version__', None),
+    runner='groupctl unittest runner',
+    runner_sha256=hashlib.sha256(RUNNER.encode('utf-8')).hexdigest(),
+)
+diagnostics = []
+diagnostic_total = 0
+
+def record(kind, test=None, err=None):
+    global diagnostic_total
+    diagnostic_total += 1
+    if len(diagnostics) >= DIAGNOSTIC_LIMIT:
+        return
+    test_id = message = None
+    try:
+        if test is not None:
+            test_id = test.id()
+    except Exception:
+        pass
+    try:
+        if err:
+            message = str(err[1])
+    except Exception:
+        pass
+    diagnostics.append(dict(
+        kind=kind, test_id=test_id,
+        exception_type=f'{err[0].__module__}.{err[0].__qualname__}' if err else None,
+        message=message,
+    ))
+
 class Result(unittest.TextTestResult):
     def startTest(self, test):
         self.bad = False
@@ -30,12 +73,15 @@ class Result(unittest.TextTestResult):
         super().addSuccess(test)
     def addFailure(self, test, err):
         self.bad = True
+        record('assertion_failure', test, err)
         super().addFailure(test, err)
     def addError(self, test, err):
         self.bad = True
+        record('error', test, err)
         super().addError(test, err)
     def addUnexpectedSuccess(self, test):
         self.bad = True
+        record('unexpected_success', test)
         super().addUnexpectedSuccess(test)
     def addSkip(self, test, reason):
         self.omitted = True
@@ -46,6 +92,8 @@ class Result(unittest.TextTestResult):
     def addSubTest(self, test, subtest, err):
         if err is not None:
             self.bad = True
+            kind = 'assertion_failure' if issubclass(err[0], test.failureException) else 'error'
+            record(kind, subtest, err)
         super().addSubTest(test, subtest, err)
     def stopTest(self, test):
         if self.bad:
@@ -56,10 +104,20 @@ class Result(unittest.TextTestResult):
             counts['passed'] += 1
         super().stopTest(test)
 counts = dict(passed=0, failed=0, skipped=0)
-suite = unittest.defaultTestLoader.discover('tests')
-result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
-with open(sys.argv[1], 'w', encoding='utf-8') as stream:
-    json.dump(dict(counts, ran=result.testsRun, successful=result.wasSuccessful()), stream)
+
+def save_result(**outcome):
+    with open(sys.argv[1], 'w', encoding='utf-8') as stream:
+        json.dump(dict(outcome, environment=environment, diagnostics=diagnostics,
+                       diagnostic_total=diagnostic_total), stream)
+
+try:
+    suite = unittest.defaultTestLoader.discover('tests')
+    result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+except Exception:
+    record('runner_error', err=sys.exc_info())
+    save_result()
+    raise
+save_result(**dict(counts, ran=result.testsRun, successful=result.wasSuccessful()))
 sys.exit(0 if result.wasSuccessful() else 1)
 '''
 
@@ -123,9 +181,71 @@ def redact_paths(value, replacements):
     if not isinstance(value, str):
         return value
     for path, label in sorted(replacements, key=lambda item: len(str(item[0])), reverse=True):
-        for spelling in {str(path), str(path).replace('\\', '/')}:
-            value = value.replace(spelling, label)
+        for spelling in {str(path), str(path).replace('\\', '/'), repr(str(path))[1:-1]}:
+            value = re.sub(re.escape(spelling), lambda match: label, value,
+                           flags=re.IGNORECASE if os.name == 'nt' else 0)
     return value
+
+
+PRIVATE_PATH = re.compile(
+    r'''(?P<quote>["'])(?:[A-Za-z]:[\\/]|\\\\|/(?!/))[^"'\r\n]+(?P=quote)'''
+    r'''|(?<![\w/:>\\])(?:[A-Za-z]:[\\/]|\\\\|/(?!/))[^\s"'<>|,;)\]]+'''
+)
+
+
+def clean_text(value, replacements):
+    value = redact_paths(value, replacements)
+    return PRIVATE_PATH.sub(lambda match: (
+        (match['quote'] or '') + '<absolute-path>' + (match['quote'] or '')), value)
+
+
+def capture_output(evidence, stdout, stderr, replacements):
+    streams = {
+        name: clean_text((data or b'').decode('utf-8', errors='replace'), replacements)
+        for name, data in (('stdout', stdout), ('stderr', stderr))
+    }
+    combined = streams['stdout'] + streams['stderr']
+    evidence['output_tail'] = combined[-OUTPUT_LIMIT:]
+    evidence['output'] = dict(
+        rule='tail of redacted text; Unicode characters; combined order stdout then stderr',
+        char_limit=OUTPUT_LIMIT, summary_char_limit=SUMMARY_LIMIT,
+        combined_truncated=len(combined) > OUTPUT_LIMIT,
+        summary_truncated=len(combined) > SUMMARY_LIMIT,
+        **{name: dict(tail=value[-OUTPUT_LIMIT:], truncated=len(value) > OUTPUT_LIMIT)
+           for name, value in streams.items()},
+    )
+    return combined[-SUMMARY_LIMIT:]
+
+
+def read_diagnostics(payload, replacements):
+    records = payload.get('diagnostics')
+    total = payload.get('diagnostic_total')
+    if not isinstance(records, list) or type(total) is not int:
+        return None
+    if total < 0 or len(records) != min(total, DIAGNOSTIC_LIMIT):
+        return None
+    entries = []
+    for record in records:
+        if not isinstance(record, dict):
+            return None
+        entry = {}
+        shortened = []
+        for field in ('kind', 'test_id', 'exception_type', 'message'):
+            value = record.get(field)
+            if value is not None:
+                if not isinstance(value, str):
+                    return None
+                value = clean_text(value, replacements)
+                if len(value) > DIAGNOSTIC_TEXT_LIMIT:
+                    shortened.append(field)
+                    value = value[:DIAGNOSTIC_TEXT_LIMIT]
+            entry[field] = value
+        entries.append(dict(entry, truncated_fields=shortened))
+    return dict(entries=entries, total=total, entry_limit=DIAGNOSTIC_LIMIT,
+                char_limit=DIAGNOSTIC_TEXT_LIMIT,
+                rule='first entries in callback order; prefix of redacted text in Unicode characters',
+                entries_truncated=len(entries) < total,
+                truncated=len(entries) < total or any(entry['truncated_fields'] for entry in entries))
 
 
 def run_tests(root, config, person_id):
@@ -146,7 +266,9 @@ def run_tests(root, config, person_id):
     validate_event(event)
     detail = ''
     evidence = dict(branch=before[0], counts_available=False, returncode=None,
-                    completed=False, successful=None, semantic_review='not_performed')
+                    completed=False, successful=None, semantic_review='not_performed',
+                    environment=None, diagnostics=None, output=None,
+                    counts=dict(status='unavailable', **dict.fromkeys(COUNT_FIELDS)))
     with tempfile.TemporaryDirectory(prefix='groupctl-test-') as directory:
         result_file = Path(directory) / 'result.json'
         command = [sys.executable, '-B', str(Path(__file__).resolve()),
@@ -166,6 +288,7 @@ def run_tests(root, config, person_id):
                         (sys.executable, '<python-executable>'),
                         (root.resolve(), '<repository>'),
                         (Path.home(), '<user-home>'),
+                        (Path(tempfile.gettempdir()), '<system-temp>'),
                         (Path(sys.base_prefix), '<python-installation>')]
         event['reproduction'] = dict(
             cwd='repository root at the recorded commit in a separate checkout',
@@ -183,35 +306,41 @@ def run_tests(root, config, person_id):
                 evidence['started'] = True
                 evidence['completed'] = True
                 evidence['returncode'] = result.returncode
-                output = (result.stdout + result.stderr).decode('utf-8', errors='replace')
-                evidence['output_tail'] = output[-12000:]
-                detail = output[-2000:] or 'Runner returned no output.'
+                evidence['counts']['status'] = 'unknown'
+                detail = capture_output(evidence, result.stdout, result.stderr, replacements)
+                detail = detail or 'Runner returned no output.'
                 if result_file.exists():
                     counts = json.loads(result_file.read_text(encoding='utf-8'),
                                         object_pairs_hook=unique_fields)
                     if not isinstance(counts, dict):
                         raise ValueError('Invalid runner result object')
+                    environment = counts.get('environment')
+                    if isinstance(environment, dict):
+                        evidence['environment'] = environment
+                    evidence['diagnostics'] = read_diagnostics(counts, replacements)
                     if type(counts.get('successful')) is bool:
                         evidence['successful'] = counts['successful']
                     if (any(type(counts.get(k)) is not int or counts[k] < 0
-                            for k in ('passed', 'failed', 'skipped', 'ran'))
+                            for k in COUNT_FIELDS)
                             or sum(counts[k] for k in ('passed', 'failed', 'skipped')) != counts['ran']):
-                        raise ValueError('Invalid runner counts')
-                    event.update({k: counts[k] for k in ('passed', 'failed', 'skipped')})
-                    evidence['counts_available'] = True
-                    evidence['ran'] = counts['ran']
-                    event['automated_result'], explanation = classify_result(counts, result.returncode)
-                    detail = explanation + detail
+                        detail = 'Invalid or missing runner counts; result inconclusive. ' + detail
+                    else:
+                        event.update({k: counts[k] for k in ('passed', 'failed', 'skipped')})
+                        evidence['counts_available'] = True
+                        evidence['ran'] = counts['ran']
+                        evidence['counts'] = dict(status='observed', **{k: counts[k] for k in COUNT_FIELDS})
+                        event['automated_result'], explanation = classify_result(counts, result.returncode)
+                        detail = explanation + detail
                 else:
                     detail = 'Runner did not produce counts; result inconclusive. ' + detail
         except subprocess.TimeoutExpired as exc:
             evidence['started'] = True
+            evidence['counts']['status'] = 'unknown'
             event['automated_result'] = 'partial'
             detail = f'Test timeout after {TIMEOUT}s; counts unavailable. '
-            evidence['output_tail'] = ((exc.stdout or b'') + (exc.stderr or b'')).decode(
-                'utf-8', errors='replace')[-12000:]
+            detail += capture_output(evidence, exc.stdout, exc.stderr, replacements)
         except (OSError, ValueError) as exc:
-            detail = f'Cannot complete test runner: {exc}; counts may be unavailable.'
+            detail = f'Cannot complete test runner: {exc}; counts may be unavailable. ' + detail
             if isinstance(exc, OSError) and not evidence['started']:
                 event['commands'] = []
     try:
@@ -225,7 +354,8 @@ def run_tests(root, config, person_id):
         detail = (f'State verification invalid: {exc}. '
                   'The recorded commit is the starting HEAD; attribution of the observations is unverified. '
                   + detail)
-    event['summary'] = ('Current-branch unittest only; AI semantic review not performed. ' + detail)
+    event['summary'] = ('Current-branch unittest only; AI semantic review not performed. '
+                        + clean_text(detail, replacements))
     event['execution'] = evidence  # Optional extension, specs/03 section 14.
     # Logs and exception messages can contain the same private paths as argv.
     event = redact_paths(event, replacements)
