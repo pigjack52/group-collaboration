@@ -1,5 +1,31 @@
 # Group Collaboration System
 
+## 步驟 3-7D-2D：STATUS 的 TEST 證據
+
+在 Repository 執行 `python -B groupctl.py status`。完整原始事件仍列在
+`Event:`，`TEST evidence` 逐筆呈現自動執行結果、scope、受測 SHA、分支與證據限制。
+
+- `pass`、`fail`、`partial`、`not_available` 分別表示事件回報通過、失敗、
+  部分完成、無法取得。STATUS 區分 runner 觀察到的案例失敗和事件回報的失敗，
+  根因仍須調查。相同 SHA 和 scope 出現不同結果時，列出所有事件 ID 供查核。
+- `Counts: observed` 顯示可核對的計數，包含實際的 0。`unknown` 和
+  `unavailable` 代表沒有可用的計數證據。舊事件仍保留原始計數、命令與摘要，
+  缺少執行證據時不將其報為已觀察。環境與診斷的詳細內容可查看原始事件。
+- HEAD 與 canonical 摘要依完整 SHA、分支／scope 及事件記載的 Git 前後狀態
+  核對結果。缺少或未通過狀態驗證的事件仍可逐筆查看，歸屬標為未確認。
+  個人分支的 `current_branch` 結果即使 SHA 相同也不列入 canonical 摘要。
+  canonical 參照仍是本機快照。
+- 自動通過與完整 TEST 程序各自呈現。現有 runner 會記錄 AI 語意審查未執行。
+  `human_checks_required=[]` 只代表沒有列出待查項目，評估狀態仍未知。
+  已列出的項目顯示待補證據。若同一事件記錄了可歸屬的人工觀察，STATUS 可顯示
+  選用 `execution.human_observations` 中的 `check`、`observed`、`evidence`
+  文字。它只呈現觀察與佐證位置，需由人查核原始佐證。
+- STATUS 只讀取本機事件，發布狀態一律顯示未確認。檔案存在、已追蹤、已提交或有
+  upstream 都不足以證明發布。查證時可用既有 `sync --discover` 檢視成功 fetch
+  後的遠端分支、tip SHA 與事件內容，並核對事件 ID 和完整 payload。
+
+端到端測試在暫存 Git Repository 驗證 TEST 寫入事件後的 STATUS 輸出。
+
 ## 步驟 3-7D-2C：AI 代理的 TEST 工程指引
 
 Repository 根目錄的 [AGENTS.md](AGENTS.md) 是 `TEST [scope]` 的操作指引。

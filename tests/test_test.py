@@ -48,6 +48,15 @@ class TestCommandTests(unittest.TestCase):
     def events(self):
         return [load_event(p) for p in (self.root / '.group/events').glob('*.json')]
 
+    def status(self):
+        before = self.git('status', '--porcelain')
+        result = subprocess.run([sys.executable, '-B', str(CLI), 'status'],
+                                cwd=self.root, capture_output=True, text=True,
+                                encoding='utf-8', timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('status', '--porcelain'), before)
+        return result.stdout
+
     def direct(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -94,6 +103,17 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
         self.assertEqual(self.git('diff', '--cached'), '')
         self.assertIn('.group/events/', self.git('status', '--short'))
+        status = self.status()
+        for evidence_line in (
+            f"Tests for exact HEAD commit: {event['event_id']}=pass",
+            "Git state: verified by recorded pre/post snapshots",
+            "Counts: observed; ran=1; passed=1; failed=0; skipped=0",
+            "Environment: recorded in event; diagnostics: recorded in event",
+            "AI semantic review: not performed; full TEST completion: not established",
+            "Human validation: assessment unknown",
+            "Publication: unconfirmed (local event; remote content not checked)",
+        ):
+            self.assertIn(evidence_line, status)
 
     def test_assertion_failure(self):
         self.suite('self.assertEqual(1, 2)')
@@ -107,6 +127,10 @@ class TestCommandTests(unittest.TestCase):
                                      test_id='test_example.Example.test_example',
                                      exception_type='builtins.AssertionError',
                                      message='1 != 2', truncated_fields=[]))
+        status = self.status()
+        self.assertIn(f"Tests for exact HEAD commit: {event['event_id']}=fail", status)
+        self.assertIn("Failure: observed by runner; root cause undetermined by STATUS", status)
+        self.assertIn('"exception_type": "builtins.AssertionError"', status)
 
     def test_error(self):
         self.suite("raise RuntimeError('fixture error')")
@@ -125,6 +149,7 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual((event['automated_result'], event['skipped']), ('partial', 1))
         self.assertEqual(event['execution']['counts']['skipped'], 1)
         self.assertEqual(event['execution']['diagnostics']['total'], 0)
+        self.assertIn(f"Tests for exact HEAD commit: {event['event_id']}=partial", self.status())
 
     def test_zero_tests(self):
         (self.root / 'tests/test_example.py').write_text('# empty\n', encoding='utf-8')
@@ -136,6 +161,9 @@ class TestCommandTests(unittest.TestCase):
         self.assertIn('Zero tests', event['summary'])
         self.assertEqual(event['execution']['counts'],
                          dict(status='observed', passed=0, failed=0, skipped=0, ran=0))
+        status = self.status()
+        self.assertIn(f"Tests for exact HEAD commit: {event['event_id']}=not_available", status)
+        self.assertIn("Counts: observed; ran=0; passed=0; failed=0; skipped=0", status)
 
     def test_cannot_start(self):
         with patch('group_test.execute', side_effect=OSError('cannot start fixture')):
@@ -164,6 +192,7 @@ class TestCommandTests(unittest.TestCase):
         self.assertIsNone(evidence['counts']['ran'])
         self.assertIsNone(evidence['diagnostics'])
         self.assertIn('before timeout', evidence['output']['stdout']['tail'])
+        self.assertIn("Counts: unknown; actual case totals not established", self.status())
 
     def test_contradictory_runner_results(self):
         cases = ((1, True, 1, 'fail'), (1, False, 0, 'fail'),
@@ -364,6 +393,29 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(event['automated_result'], 'partial')
         self.assertFalse(event['execution']['state_verified'])
         self.assertEqual((self.root / 'tracked.txt').read_text(), 'changed')
+        status = self.status()
+        self.assertIn("Git state: verification failed; commit attribution unconfirmed", status)
+        self.assertIn("Tests for exact HEAD commit: no attributable result; unknown", status)
+
+    def test_status_does_not_promote_personal_or_locally_committed_evidence(self):
+        branch = 'people/P01/topic'
+        self.git('switch', '-c', branch)
+        self.assertEqual(self.cli('--person-id', 'P01').returncode, 0)
+        event, = self.events()
+        status = self.status()
+        self.assertIn(f"Tests for exact HEAD commit: {event['event_id']}=pass", status)
+        self.assertIn("Tests for exact canonical commit: no attributable result; unknown", status)
+
+        local_tip = self.commit('record local evidence')
+        self.git('remote', 'add', 'origin', str(self.root / 'offline.git'))
+        self.git('update-ref', f'refs/remotes/origin/{branch}', local_tip)
+        self.git('branch', f'--set-upstream-to=origin/{branch}')
+        self.suite('self.assertEqual(2, 2)')
+        status = self.status()
+        self.assertIn(f"Test {event['event_id']}: automated=pass", status)
+        self.assertIn("Tests for exact HEAD commit: no attributable result; unknown", status)
+        self.assertIn("Tests for exact canonical commit: no attributable result; unknown", status)
+        self.assertIn("Publication: unconfirmed (local event; remote content not checked)", status)
 
     def test_head_change_invalidates_pass(self):
         execute = group_test.execute

@@ -1,5 +1,6 @@
 """Local group STATUS analysis. Event declarations are never Git proof."""
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
@@ -101,6 +102,114 @@ def _quoted(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
 
+@dataclass(frozen=True)
+class TestEvidence:
+    event: dict
+
+    @property
+    def execution(self):
+        execution = self.event.get("execution")
+        return execution if isinstance(execution, dict) else {}
+
+    @property
+    def attribution(self):
+        return self.execution.get("state_verified")
+
+    def counts(self):
+        execution = self.execution
+        fields = ("passed", "failed", "skipped")
+        counts = execution.get("counts")
+        if "counts" not in execution and execution.get("counts_available") is True:
+            # Older runner events had only the flag and the envelope counts.
+            counts = {key: self.event[key] for key in fields}
+            counts.update(status="observed", ran=execution.get("ran"))
+        if isinstance(counts, dict):
+            status = counts.get("status")
+            if status == "unavailable" and execution.get("counts_available") is not True:
+                return "unavailable", None
+            if (status == "observed" and execution.get("counts_available") is not False
+                    and all(type(counts.get(key)) is int and counts[key] == self.event[key]
+                            for key in fields)
+                    and type(counts.get("ran")) is int
+                    and counts["ran"] == sum(counts[key] for key in fields)):
+                return "observed", counts
+        return "unknown", None
+
+    def matches_scope(self, branch, *, canonical=False):
+        scope = self.event["scope"]
+        recorded_branch = self.execution.get("branch")
+        if canonical:
+            return recorded_branch == branch and scope in ("current_branch", "canonical", "main")
+        if scope == "current_branch" or recorded_branch is not None:
+            return branch is not None and recorded_branch == branch
+        return True
+
+    def supports_pass(self):
+        _, counts = self.counts()
+        execution = self.execution
+        return (counts is not None and counts["passed"] > 0 and counts["failed"] == 0
+                and all(execution.get(key) is not False for key in ("started", "completed", "successful"))
+                and execution.get("returncode") in (None, 0)
+                and bool(self.event["commands"]))
+
+    def format(self):
+        event, execution = self.event, self.execution
+        result = event["automated_result"]
+        status, counts = self.counts()
+        count_detail = ("; ".join(f"{key}={counts[key]}" for key in
+                                  ("ran", "passed", "failed", "skipped")) if counts else
+                        "actual case totals not established")
+        git_state = "unknown; commit attribution unconfirmed"
+        if self.attribution is True:
+            git_state = "verified by recorded pre/post snapshots"
+        elif self.attribution is False:
+            git_state = "verification failed; commit attribution unconfirmed"
+        diagnostics = execution.get("diagnostics")
+        diagnostic_status = "unavailable"
+        if isinstance(diagnostics, dict):
+            diagnostic_status = "recorded in event"
+            if diagnostics.get("truncated") is True:
+                diagnostic_status += " (truncated)"
+        environment = execution.get("environment")
+        environment_status = "recorded in event" if isinstance(environment, dict) and environment else "unavailable"
+        review = ("not performed" if execution.get("semantic_review") == "not_performed"
+                  else "not established by STATUS")
+        observations = execution.get("human_observations")
+        recorded = [
+            item for item in observations
+            if isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key].strip()
+                                             for key in ("check", "observed", "evidence"))
+        ] if isinstance(observations, list) and self.attribution is True else []
+        observed_checks = {item["check"] for item in recorded}
+        pending = [check for check in event["human_checks_required"] if check not in observed_checks]
+        lines = [
+            f"Test {event['event_id']}: automated={result}; scope={_quoted(event['scope'])}; "
+            f"commit={_quoted(event['commit'])}; branch={_quoted(execution.get('branch'))}",
+            f"  Git state: {git_state}",
+            f"  Counts: {status}; {count_detail}",
+            f"  Environment: {environment_status}; diagnostics: {diagnostic_status}",
+            f"  AI semantic review: {review}; full TEST completion: not established",
+            "  Publication: unconfirmed (local event; remote content not checked)",
+        ]
+        if result == "fail" or (counts and counts["failed"]):
+            failure = "observed by runner" if counts and counts["failed"] else "reported by event"
+            lines.append(f"  Failure: {failure}; root cause undetermined by STATUS")
+        elif event["failed"]:
+            lines.append("  Failure count reported in event; observation and root cause unconfirmed")
+        if result == "pass" and event["failed"]:
+            lines.append("  Evidence conflict: pass with a nonzero reported failure count")
+        elif result == "pass" and not self.supports_pass():
+            lines.append("  Evidence limit: reported pass lacks consistent execution evidence")
+        if not pending and not recorded:
+            lines.append("  Human validation: assessment unknown")
+        if pending:
+            lines.append(f"  Human validation: pending evidence for {_quoted(pending)}")
+        for item in recorded:
+            lines.append(f"  Human validation: observation and evidence reference recorded "
+                         f"(unverified by STATUS): {_quoted(item)}")
+        return lines
+
+
 def format_group_status(report):
     config, git, events = report["config"], report["git"], report["events"]
     lines = [
@@ -151,18 +260,29 @@ def format_group_status(report):
             lines.append(f"  {kind} records: " + (
                 ", ".join(e["event_id"] for e in selected) or "not yet recorded"))
         lines.append("  Actual integration into HEAD/canonical: unknown (Git ancestry not verified)")
-    for label, commit in (("HEAD", git.head), ("canonical", git.canonical_commit)):
-        tests = [e for e in events if e["event_type"] == "test_result" and e["commit"] == commit]
-        attributed = []
-        for event in tests:
-            execution = event.get("execution")
-            if isinstance(execution, dict) and execution.get("state_verified") is False:
-                lines.append(f"Test {event['event_id']}={event['automated_result']}: "
-                             f"recorded {label} commit attribution unverified")
-            else:
-                attributed.append(f"{event['event_id']}={event['automated_result']}")
+    tests = [TestEvidence(event) for event in events if event["event_type"] == "test_result"]
+    if tests:
+        lines.append("TEST evidence (automated values are event declarations):")
+    outcomes = {}
+    for test in tests:
+        lines.extend(test.format())
+        event = test.event
+        outcomes.setdefault((event["commit"], event["scope"]), []).append(event)
+    for (commit, scope), records in outcomes.items():
+        if len({event["automated_result"] for event in records}) > 1:
+            declarations = ", ".join(f"{event['event_id']}={event['automated_result']}" for event in records)
+            lines.append(f"Potentially conflicting TEST declarations for commit={_quoted(commit)} "
+                         f"scope={_quoted(scope)}: {declarations}; no winner inferred")
+    for label, commit, branch in (("HEAD", git.head, git.branch),
+                                  ("canonical", git.canonical_commit, config["canonical_branch"])):
+        attributed = [
+            f"{test.event['event_id']}={test.event['automated_result']}" for test in tests
+            if test.event["commit"] == commit and test.attribution is True
+            and test.matches_scope(branch, canonical=label == "canonical")
+            and (test.event["automated_result"] != "pass" or test.supports_pass())
+        ]
         lines.append(f"Tests for exact {label} commit: " +
-                     (", ".join(attributed) or "not yet recorded; unknown"))
+                     (", ".join(attributed) or "no attributable result; unknown"))
     blockers = [e["event_id"] for e in events if e["event_type"] == "blocker"]
     lines.append("Blocker records: " + (", ".join(blockers) or "not yet recorded"))
     lines += [

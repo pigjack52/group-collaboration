@@ -65,7 +65,8 @@ class StatusTests(unittest.TestCase):
         for text in ("Events: 5", "review records: E-review",
                      "integration_result records: E-integrate",
                      "test_result records: E-test", "blocker records: E-block",
-                     "Tests for exact HEAD commit: E-test=pass",
+                     "Test E-test: automated=pass",
+                     "Tests for exact HEAD commit: no attributable result; unknown",
                      "Actual integration into HEAD/canonical: unknown",
                      "Waiting for decision", "other", "different"):
             self.assertIn(text, result.stdout)
@@ -85,7 +86,7 @@ class StatusTests(unittest.TestCase):
                    commit="test-commit", automated_result="pass")
         text = self.cli().stdout
         self.assertIn("test_result records: E-test", text)
-        self.assertIn("Tests for exact HEAD commit: not yet recorded; unknown", text)
+        self.assertIn("Tests for exact HEAD commit: no attributable result; unknown", text)
         self.assertIn("related_events does not extend coverage", text)
 
     def test_historical_test_event_and_unverified_attribution(self):
@@ -98,8 +99,12 @@ class StatusTests(unittest.TestCase):
                    failed=1, execution={"state_verified": False})
         status = self.cli()
         self.assertEqual(status.returncode, 0, status.stderr)
-        self.assertIn("Tests for exact HEAD commit: E-historical=pass\n", status.stdout)
-        self.assertIn("Test E-unverified=fail: recorded HEAD commit attribution unverified", status.stdout)
+        self.assertIn("Tests for exact HEAD commit: no attributable result; unknown", status.stdout)
+        self.assertIn("Test E-historical: automated=pass", status.stdout)
+        self.assertIn("Evidence conflict: pass with a nonzero reported failure count", status.stdout)
+        self.assertIn("Counts: unknown; actual case totals not established", status.stdout)
+        self.assertIn("Test E-unverified: automated=fail", status.stdout)
+        self.assertIn("Git state: verification failed; commit attribution unconfirmed", status.stdout)
         with self.assertRaisesRegex(EventError, "refusing to overwrite"):
             write_event(self.root, dict(historic, automated_result="fail"))
         self.assertEqual(path.read_bytes(), original)
@@ -206,7 +211,23 @@ class StatusTests(unittest.TestCase):
         self.event("test_result", "E-fail", commit=head, automated_result="fail")
         text = self.cli().stdout
         self.assertIn("E-fail=fail, E-pass=pass", text)
-        self.assertIn("conflicting records are retained", text)
+        self.assertIn("Potentially conflicting TEST declarations", text)
+        self.assertIn("no winner inferred", text)
+
+    def test_human_observations_require_evidence_and_attribution(self):
+        head = self.git("rev-parse", "HEAD")
+        observations = [
+            {"check": "Selection", "observed": "Z stayed selected", "evidence": "capture.png"},
+            {"check": "Focus", "observed": "Visible", "evidence": ""},
+        ]
+        for identifier, verified in (("E-confirmed", True), ("E-unverified", False)):
+            self.event("test_result", identifier, commit=head,
+                       human_checks_required=["Selection", "Focus"],
+                       execution={"state_verified": verified, "human_observations": observations})
+        text = self.cli().stdout
+        self.assertEqual(text.count("Human validation: observation and evidence reference recorded"), 1)
+        self.assertIn('Human validation: pending evidence for ["Focus"]', text)
+        self.assertIn('Human validation: pending evidence for ["Selection", "Focus"]', text)
 
     def test_invalid_config_and_directory(self):
         (self.group / "group.json").write_text("{}", encoding="utf-8")
