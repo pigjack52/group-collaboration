@@ -1,5 +1,48 @@
 # Group Collaboration System
 
+## 步驟 3-8C-2：PUB 工作 Commit Push
+
+先審閱要公開的 Commit 範圍、個人分支和遠端 URL。以
+`git ls-remote --symref origin refs/heads/people/student01/my-topic` 取得並核對遠端目前的
+完整 SHA。查詢成功且確認分支不存在時，使用 `absent` 授權建立該個人分支。
+`--confirm-reviewed` 表示操作者已審閱內容與目的地，並授權這次 Push。
+
+```powershell
+python -B groupctl.py pub --push-work --person-id student01 --expected-branch people/student01/my-topic --expected-head $workSha --remote origin --expected-url https://github.com/pigjack52/group-collaboration.git --expected-remote-head $remoteSha --confirm-reviewed
+```
+
+先將已審閱的完整工作 SHA 填入 `$workSha`，並將已審閱的完整遠端 SHA 或字串
+`absent` 填入 `$remoteSha`。
+
+遠端名稱必須各自解析到唯一且相同的 fetch 與 push URL，並與 `--expected-url` 完全一致。
+若已提交的 `.group/group.json` 有 `repository`，也必須一致。支援無內嵌憑證的 HTTPS、
+`ssh://` 與絕對本機路徑。Push 在暫存 Git repository 執行，使用 Git 的使用者及系統層
+認證設定，或已配置的 SSH／認證代理。依賴來源 repository 專用認證設定、已啟用的
+`pre-push` hook、淺層歷史或 graft 的工作流程需另行處理。工具會保留未提交的本機內容。
+
+工具即時查詢目標分支，檢查遠端 tip 是否符合審閱值，並確認既有 tip 是工作 Commit
+的祖先。若當地缺少遠端 tip 的歷史，先取得並審閱該歷史，再決定是否重試。
+Push 只送出指定 SHA 到指定個人分支的 refspec。Push 當下的 `pre-push` guard 會核對
+Git 收到的目的地、來源 SHA、目標 ref 與伺服器宣告的舊 SHA。伺服器接受更新時，
+Git 再以該舊 SHA 比對 ref。Push 返回成功後，工具另執行一次 `git ls-remote`，
+只有查到目標 ref 指向完全相同的工作 SHA 才會回報 `verified`。
+
+| `result` | 意義 | 退出碼 |
+| --- | --- | --- |
+| `not_executed` | 前置驗證未通過，未呼叫 Git Push | 1 |
+| `push_rejected` | Git 或 Push guard 明確拒絕更新 | 1 |
+| `verification_failed` | Push 可能已生效，遠端結果未獲確認 | 1 |
+| `already_present` | 即時查詢已看到指定 SHA，省略重複 Push | 0 |
+| `verified` | Push 成功，且獨立查詢確認指定 SHA | 0 |
+
+參數錯誤的退出碼為 2。遇到連線中斷、逾時或驗證失敗時，可以用相同參數重試。
+如果遠端已指向指定 SHA，就會回報 `already_present`。如果遠端改為其他 SHA，
+必須先查明並審閱新狀態，才能再次授權。確認只反映查詢當下，遠端之後仍可能更新。
+以 SHA 比對也無法察覺 ref 在兩次觀察之間變更後又回到同一 SHA。請使用信任的 Git
+伺服器與認證設定，並讓目標分支使用一般直接 ref。工具會拒絕查詢中顯示的符號 ref，
+Git 協定所能揭露的 ref 資訊取決於伺服器。此步驟的範圍是工作 Commit，
+`change_published` 事件須在後續步驟處理。
+
 ## 步驟 3-8C-1：PUB 工作 Commit
 
 先執行下方的唯讀預檢，記下 `facts.branch` 和完整的 `facts.head`。AI 和人類應審閱
