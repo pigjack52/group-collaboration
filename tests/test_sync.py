@@ -102,6 +102,18 @@ class SyncTests(unittest.TestCase):
         self.assertIn('New events: 0', self.sync())
         self.assertNotIn('New event [', self.sync())
 
+    def test_historical_test_event_without_execution_extension(self):
+        event = dict(sample('test_result'), event_id='E-peer', person_id='P02',
+                     automated_result='pass', failed=1)
+        self.publish(event)
+        path = self.b / '.group/events/E-peer.json'
+        original = path.read_bytes()
+        output = self.sync()
+        self.assertIn('"event_type": "test_result"', output)
+        self.assertIn('"automated_result": "pass"', output)
+        self.assertIn('New events: 0', self.sync())
+        self.assertEqual(path.read_bytes(), original)
+
     def test_canonical_new_commit(self):
         self.sync()
         self.git(self.b, 'checkout', 'main')

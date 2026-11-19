@@ -153,9 +153,16 @@ def format_group_status(report):
         lines.append("  Actual integration into HEAD/canonical: unknown (Git ancestry not verified)")
     for label, commit in (("HEAD", git.head), ("canonical", git.canonical_commit)):
         tests = [e for e in events if e["event_type"] == "test_result" and e["commit"] == commit]
-        lines.append(f"Tests for exact {label} commit: " + (
-            ", ".join(f"{e['event_id']}={e['automated_result']}" for e in tests)
-            or "not yet recorded; unknown"))
+        attributed = []
+        for event in tests:
+            execution = event.get("execution")
+            if isinstance(execution, dict) and execution.get("state_verified") is False:
+                lines.append(f"Test {event['event_id']}={event['automated_result']}: "
+                             f"recorded {label} commit attribution unverified")
+            else:
+                attributed.append(f"{event['event_id']}={event['automated_result']}")
+        lines.append(f"Tests for exact {label} commit: " +
+                     (", ".join(attributed) or "not yet recorded; unknown"))
     blockers = [e["event_id"] for e in events if e["event_type"] == "blocker"]
     lines.append("Blocker records: " + (", ".join(blockers) or "not yet recorded"))
     lines += [

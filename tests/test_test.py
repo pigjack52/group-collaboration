@@ -53,6 +53,13 @@ class TestCommandTests(unittest.TestCase):
             code = group_test.run_tests(self.root, self.config, 'P01')
         return code, output.getvalue()
 
+    def runner_result(self, payload, returncode):
+        def execute(command, root):
+            if payload is not None:
+                Path(command[-1]).write_text(payload, encoding='utf-8')
+            return subprocess.CompletedProcess(command, returncode, b'', b'')
+        return execute
+
     def test_success_real_cli_and_evidence(self):
         before_refs = self.git('show-ref')
         result = self.cli('--person-id', 'P01', cwd=self.root / 'tests')
@@ -67,6 +74,10 @@ class TestCommandTests(unittest.TestCase):
         self.assertEqual(event['execution']['argv'][3], '--unittest-runner')
         self.assertEqual(event['commands'], [subprocess.list2cmdline(event['execution']['argv'])])
         self.assertTrue(event['execution']['started'])
+        self.assertTrue(event['execution']['completed'])
+        self.assertTrue(event['execution']['successful'])
+        self.assertTrue(event['execution']['state_verified'])
+        self.assertEqual(event['execution']['ran'], 1)
         self.assertIn('redacted', event['execution']['command_representation'])
         self.assertIn('本機事件已建立，尚未 Commit／Push', result.stdout)
         self.assertIn('NOT PERFORMED', result.stdout)
@@ -121,7 +132,63 @@ class TestCommandTests(unittest.TestCase):
             code, _ = self.direct()
         self.assertEqual(code, 1)
         self.assertEqual(self.events()[0]['automated_result'], 'partial')
+        self.assertFalse(self.events()[0]['execution']['completed'])
         self.assertIn('timeout', self.events()[0]['summary'])
+
+    def test_contradictory_runner_results(self):
+        cases = ((1, True, 1, 'fail'), (1, False, 0, 'fail'),
+                 (1, True, 0, 'fail'), (0, False, 0, 'partial'),
+                 (0, True, 1, 'partial'), (0, None, 0, 'partial'))
+        for index, (failed, successful, returncode, outcome) in enumerate(cases):
+            with self.subTest(failed=failed, successful=successful, returncode=returncode):
+                payload = json.dumps(dict(passed=1, failed=failed, skipped=0,
+                                          ran=1 + failed, successful=successful))
+                with patch('group_test.execute', side_effect=self.runner_result(payload, returncode)):
+                    code, output = self.direct()
+                event = json.JSONDecoder().raw_decode(output)[0]
+                self.assertEqual(code, 1)
+                stored = load_event(self.root / '.group/events' / (event['event_id'] + '.json'))
+                self.assertEqual(stored, event)
+                self.assertEqual((event['automated_result'], event['failed']), (outcome, failed))
+                self.assertEqual(event['execution']['returncode'], returncode)
+                self.assertIs(event['execution']['successful'], successful)
+                self.assertIn('Inconsistent runner evidence', event['summary'])
+                self.commit(f'contradiction fixture {index}')
+
+    def test_missing_or_corrupt_counts(self):
+        cases = (None, '{', '[]',
+                 '{"passed":true,"failed":0,"skipped":0,"ran":1,"successful":true}',
+                 '{"passed":1,"failed":0,"skipped":0,"ran":2,"successful":true}',
+                 '{"passed":1,"failed":1,"failed":0,"skipped":0,"ran":1,"successful":true}',
+                 '{"passed":1,"skipped":0,"ran":1,"successful":true}')
+        for index, payload in enumerate(cases):
+            with self.subTest(payload=payload):
+                with patch('group_test.execute', side_effect=self.runner_result(payload, 0)):
+                    code, output = self.direct()
+                self.assertEqual(code, 1)
+                event = json.JSONDecoder().raw_decode(output)[0]
+                self.assertEqual(event['automated_result'], 'not_available')
+                self.assertFalse(event['execution']['counts_available'])
+                self.commit(f'invalid counts fixture {index}')
+
+    def test_runner_exit_without_result(self):
+        self.suite('import os; os._exit(7)')
+        self.assertEqual(self.cli('--person-id', 'P01').returncode, 1)
+        event, = self.events()
+        self.assertEqual(event['automated_result'], 'not_available')
+        self.assertEqual(event['execution']['returncode'], 7)
+
+    def test_no_success_callback_cannot_pass(self):
+        (self.root / 'tests/test_example.py').write_text(
+            'import unittest\nclass Example(unittest.TestCase):\n'
+            ' def test_example(self): pass\n'
+            ' def run(self, result):\n'
+            '  result.startTest(self)\n  result.stopTest(self)\n', encoding='utf-8')
+        self.commit('runner without case outcome')
+        self.assertEqual(self.cli('--person-id', 'P01').returncode, 1)
+        event, = self.events()
+        self.assertEqual(event['automated_result'], 'not_available')
+        self.assertFalse(event['execution']['counts_available'])
 
     def test_dirty_refused_and_preserved(self):
         for kind in ('unstaged', 'staged', 'untracked'):
@@ -232,6 +299,29 @@ class TestCommandTests(unittest.TestCase):
         event, = self.events()
         self.assertEqual(event['commit'], self.head)
         self.assertEqual(event['automated_result'], 'partial')
+
+    def test_failed_cases_survive_invalid_git_state(self):
+        self.suite('self.fail("observed fixture failure")')
+        execute = group_test.execute
+        for change_head in (False, True):
+            with self.subTest(change_head=change_head):
+                def invalidate(command, root):
+                    result = execute(command, root)
+                    (root / 'tracked.txt').write_text(f'changed in fixture {change_head}', encoding='utf-8')
+                    if change_head:
+                        self.commit('fixture concurrent HEAD change')
+                    return result
+                starting_head = self.git('rev-parse', 'HEAD')
+                with patch('group_test.execute', side_effect=invalidate):
+                    code, output = self.direct()
+                event = json.JSONDecoder().raw_decode(output)[0]
+                self.assertEqual(code, 1)
+                self.assertEqual((event['automated_result'], event['failed']), ('fail', 1))
+                self.assertEqual(event['commit'], starting_head)
+                self.assertFalse(event['execution']['state_verified'])
+                self.assertIn('attribution of the observations is unverified', event['summary'])
+                self.assertIn('observed fixture failure', event['execution']['output_tail'])
+                self.commit('retain fixture evidence')
 
     def test_only_read_only_git_commands(self):
         from group_git import _git

@@ -23,7 +23,11 @@ class Result(unittest.TextTestResult):
     def startTest(self, test):
         self.bad = False
         self.omitted = False
+        self.passed = False
         super().startTest(test)
+    def addSuccess(self, test):
+        self.passed = True
+        super().addSuccess(test)
     def addFailure(self, test, err):
         self.bad = True
         super().addFailure(test, err)
@@ -44,7 +48,12 @@ class Result(unittest.TextTestResult):
             self.bad = True
         super().addSubTest(test, subtest, err)
     def stopTest(self, test):
-        counts['failed' if self.bad else 'skipped' if self.omitted else 'passed'] += 1
+        if self.bad:
+            counts['failed'] += 1
+        elif self.omitted:
+            counts['skipped'] += 1
+        elif self.passed:
+            counts['passed'] += 1
         super().stopTest(test)
 counts = dict(passed=0, failed=0, skipped=0)
 suite = unittest.defaultTestLoader.discover('tests')
@@ -79,6 +88,32 @@ def execute(command, root):
                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8'))
 
 
+def unique_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError('Duplicate runner result fields')
+    return fields
+
+
+def classify_result(counts, returncode):
+    successful = counts.get('successful')
+    inconsistent = (type(successful) is not bool
+                    or returncode != (0 if successful is True else 1)
+                    or (successful is True and counts['failed'] > 0))
+    if counts['failed'] > 0:
+        return 'fail', 'Inconsistent runner evidence; failed cases observed. ' if inconsistent else ''
+    if inconsistent:
+        return 'partial', 'Inconsistent runner evidence; result inconclusive. '
+    if not successful:
+        # unittest can report failures outside a test case (e.g. setUpClass).
+        return 'fail', ''
+    if not counts['ran']:
+        return 'not_available', 'Zero tests; not_available. '
+    if not counts['passed']:
+        return 'partial', 'No successful cases. '
+    return 'pass', ''
+
+
 def redact_paths(value, replacements):
     """Remove known machine locations, retaining repository-relative suffixes."""
     if isinstance(value, dict):
@@ -111,7 +146,7 @@ def run_tests(root, config, person_id):
     validate_event(event)
     detail = ''
     evidence = dict(branch=before[0], counts_available=False, returncode=None,
-                    semantic_review='not_performed')
+                    completed=False, successful=None, semantic_review='not_performed')
     with tempfile.TemporaryDirectory(prefix='groupctl-test-') as directory:
         result_file = Path(directory) / 'result.json'
         command = [sys.executable, '-B', str(Path(__file__).resolve()),
@@ -146,24 +181,27 @@ def run_tests(root, config, person_id):
                 event['commands'] = [subprocess.list2cmdline(evidence['argv'])]
                 result = execute(command, root)
                 evidence['started'] = True
+                evidence['completed'] = True
                 evidence['returncode'] = result.returncode
                 output = (result.stdout + result.stderr).decode('utf-8', errors='replace')
                 evidence['output_tail'] = output[-12000:]
                 detail = output[-2000:] or 'Runner returned no output.'
                 if result_file.exists():
-                    counts = json.loads(result_file.read_text(encoding='utf-8'))
+                    counts = json.loads(result_file.read_text(encoding='utf-8'),
+                                        object_pairs_hook=unique_fields)
+                    if not isinstance(counts, dict):
+                        raise ValueError('Invalid runner result object')
+                    if type(counts.get('successful')) is bool:
+                        evidence['successful'] = counts['successful']
                     if (any(type(counts.get(k)) is not int or counts[k] < 0
                             for k in ('passed', 'failed', 'skipped', 'ran'))
-                            or sum(counts[k] for k in ('passed', 'failed', 'skipped')) != counts['ran']
-                            or type(counts.get('successful')) is not bool):
+                            or sum(counts[k] for k in ('passed', 'failed', 'skipped')) != counts['ran']):
                         raise ValueError('Invalid runner counts')
                     event.update({k: counts[k] for k in ('passed', 'failed', 'skipped')})
                     evidence['counts_available'] = True
-                    if counts['ran']:
-                        event['automated_result'] = ('fail' if result.returncode or not counts['successful']
-                                                     else 'pass' if counts['passed'] else 'partial')
-                    else:
-                        detail = 'Zero tests; not_available. ' + detail
+                    evidence['ran'] = counts['ran']
+                    event['automated_result'], explanation = classify_result(counts, result.returncode)
+                    detail = explanation + detail
                 else:
                     detail = 'Runner did not produce counts; result inconclusive. ' + detail
         except subprocess.TimeoutExpired as exc:
@@ -182,8 +220,11 @@ def run_tests(root, config, person_id):
         evidence['state_verified'] = True
     except GitError as exc:
         evidence['state_verified'] = False
-        event['automated_result'] = 'partial'
-        detail = f'State verification invalid: {exc}. Observations do not prove the recorded commit. ' + detail
+        if event['automated_result'] == 'pass':
+            event['automated_result'] = 'partial'
+        detail = (f'State verification invalid: {exc}. '
+                  'The recorded commit is the starting HEAD; attribution of the observations is unverified. '
+                  + detail)
     event['summary'] = ('Current-branch unittest only; AI semantic review not performed. ' + detail)
     event['execution'] = evidence  # Optional extension, specs/03 section 14.
     # Logs and exception messages can contain the same private paths as argv.

@@ -27,9 +27,17 @@ Git user.name 或分支名稱推定身分。可從 Repository 子目錄執行。
 輸出「本機事件已建立，尚未 Commit／Push」；不自動執行 Fetch、Add、Commit、
 Push、Merge、Checkout、Reset 或 Clean，不能據此宣稱已上傳 GitHub。
 
-結果政策：有成功案例且全部正常完成為 `pass`；assertion failure、error 或
-unexpected success 為 `fail`；只有 skip、逾時、或執行後 Git 驗證失效為 `partial`；
-零測試、缺少 tests、無法啟動或無有效計數為 `not_available`。
+只有 runner 已啟動並完成、退出碼為 0、`successful=true`、逐案例計數有效且總和
+等於執行數、`failed=0`、至少一個實際成功案例，而且前後 Git 快照皆驗證成功、
+分支與 HEAD 一致時，才記為 `pass`。
+有效計數有失敗案例時記為 `fail`，即使退出碼或 `successful` 與之矛盾。
+退出碼 1 與 `successful=false` 一致時也記為 `fail`，例如案例之外的 fixture 錯誤。
+其餘互相矛盾的 runner 證據、只有 skip、逾時，或原本可判為 pass 但後續 Git 驗證
+失效時，記為 `partial`。正常完成但零測試、缺少 tests、無法啟動或無有效計數時，
+記為 `not_available`。
+Git 驗證失效時保留觀察到的失敗與計數，`commit` 記錄開始時的 HEAD，
+`execution.state_verified=false` 與摘要標示觀察結果的 commit 歸屬未確認。
+STATUS 會個別顯示這類紀錄；事件讀取與 SYNC 沿用既有協定驗證，歷史事件可省略 `execution`。
 同一測試方法的多個失敗 subtest 只計一個 failed；expected failure 計入 skipped，
 一個案例同時有 skip 與失敗時以 failed 優先。class/module fixture 錯誤造成
 無法完整對應案例計數時保留診斷並回報 unavailable，不偽造計數或 pass。
@@ -37,7 +45,8 @@ unexpected success 為 `fail`；只有 skip、逾時、或執行後 Git 驗證�
 參數錯誤回傳 2。失敗或驗證失效仍盡可能建立真實事件，不自動回復測試造成的變更。
 
 `execution` 是 specs/03 §14 允許的**選用實作擴充**，未新增正式必填欄位。
-包含遮蔽路徑的實際 argv、branch、退出碼、計數是否可用、狀態驗證及輸出尾段（最多 12000 字元）；
+包含遮蔽路徑的實際 argv、branch、是否啟動與完成、退出碼、runner 的 `successful`、
+計數是否可用、有效時的執行數 `ran`、狀態驗證及輸出尾段（最多 12000 字元）；
 summary 保留必要診斷。計數不可用時整數欄位為 0，搭配 counts_available=false
 與非 pass 結果表示未知，不能讀成實際測了零個失敗。
 stdout/stderr 合併供診斷，非完整持久 log；臨時結果檔執行後移除。
@@ -59,7 +68,8 @@ stdout/stderr 合併供診斷，非完整持久 log；臨時結果檔執行後�
 此命令不完成整套 TEST：尚未支援其他 scope、自動探索 build/lint/UI、
 失敗根因調查、AI 語意審查、人工檢查規劃及事件發布。
 `human_checks_required=[]` 表示本機 helper 尚未提出人工項目，不代表不需要人工檢查。
-自動測試通過只證明本次 unittest 觀察，不證明測試充分或語意正確。
+`automated_result="pass"` 只代表本次已執行的自動檢查通過。AI 語意審查、
+人工驗證與完整 TEST 程序的完成情況須另有證據。
 功能驗證使用暫存 Git Repository；不要為驗證此功能在正式 Repository 建立測試事件。
 
 ## 步驟 3-6C：SYNC 安全更新

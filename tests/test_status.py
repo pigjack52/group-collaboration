@@ -8,7 +8,7 @@ import unittest
 
 import test_git as fixtures
 from test_events import sample
-from group_events import write_event
+from group_events import EventError, write_event
 from group_status import collect_status, format_group_status
 
 CLI = Path(__file__).resolve().parents[1] / "groupctl.py"
@@ -87,6 +87,22 @@ class StatusTests(unittest.TestCase):
         self.assertIn("test_result records: E-test", text)
         self.assertIn("Tests for exact HEAD commit: not yet recorded; unknown", text)
         self.assertIn("related_events does not extend coverage", text)
+
+    def test_historical_test_event_and_unverified_attribution(self):
+        head = self.git("rev-parse", "HEAD")
+        historic = self.event("test_result", "E-historical", commit=head,
+                              automated_result="pass", failed=1)
+        path = self.group / "events/E-historical.json"
+        original = path.read_bytes()
+        self.event("test_result", "E-unverified", commit=head, automated_result="fail",
+                   failed=1, execution={"state_verified": False})
+        status = self.cli()
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Tests for exact HEAD commit: E-historical=pass\n", status.stdout)
+        self.assertIn("Test E-unverified=fail: recorded HEAD commit attribution unverified", status.stdout)
+        with self.assertRaisesRegex(EventError, "refusing to overwrite"):
+            write_event(self.root, dict(historic, automated_result="fail"))
+        self.assertEqual(path.read_bytes(), original)
 
     def test_invalid_event_reports_path_and_field(self):
         path = write_event(self.root, sample())
