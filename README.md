@@ -1,5 +1,45 @@
 # Group Collaboration System
 
+## 步驟 3-8C-1：PUB 工作 Commit
+
+先執行下方的唯讀預檢，記下 `facts.branch` 和完整的 `facts.head`。AI 和人類應審閱
+HEAD 到 index 的 diff、index 到工作樹的 diff，以及選取的 untracked 檔案內容。
+若有既有 Commit，也要檢視實際提交歷史和 diff。確認貢獻範圍、秘密或私人資料、
+生成產物、介面與假設變更、工程品質，以及適用的測試與實際證據。工具只檢查 Git
+狀態與提交範圍。取得使用者對檔案與訊息的明確授權後，才傳入 `--confirm-reviewed`。
+
+```powershell
+python -B groupctl.py pub --work-commit --person-id student01 --expected-branch people/student01/my-topic --expected-head <完整SHA> --file src/parser.py --file tests/test_parser.py --message "Implement nested parsing" --confirm-reviewed
+```
+
+將範例中的分支、SHA 和檔案替換為審閱值。以重複的 `--file` 指定 repo 根目錄相對的
+單一檔案。Git 將路徑當作字面值，且工具核對整棵候選 tree 對父 Commit 的實際變更
+清單。改名需選取來源及目的地。未選取的 staged 內容、同一路徑同時有 staged 和
+工作樹改動、衝突、未完成的 Git 操作、index lock、隱藏 index 旗標都會阻擋。
+群組設定及該成員的描述檔須存在於預期 HEAD，且 JSON 內容須與工作樹一致。
+建立 Commit 的模式也拒絕作用中的提交或 ref transaction hooks、已設定的外部 filters、
+split index、sparse checkout 與選取的 gitlink 變更。需要這些功能時請使用專案既有的
+提交流程。若倉庫要求簽章，請依專案規範獨立確認簽章政策。
+
+請從審閱到命令完成期間暫停編輯和其他 Git 操作。`--confirm-reviewed` 是操作人的
+確認，工具不會保存先前審閱時的工作檔案快照。工具持有 Git index lock，使用隔離
+index 建立候選 tree，核對 Commit 的 tree 和唯一父 SHA，再以預期舊 SHA 更新指定的
+個人 ref。若低階 Git 操作繞過 index lock 並切換 HEAD，分支更新後的檢查會回報可觀察的
+變化。分支更新與安裝 index 是兩個步驟。若出錯，請依 `phase`、`candidate_commit`、
+`commit` 和 `git_status` 查核。可能留下未引用的 Git 物件，或留下已更新的個人分支與
+原 index，工具不會自動回滾。
+
+已經有審閱過的工作 Commit 時，可明確選取個人分支目前的完整 HEAD：
+
+```powershell
+python -B groupctl.py pub --use-existing --person-id student01 --expected-branch people/student01/my-topic --expected-head <完整SHA> --confirm-reviewed
+```
+
+這個模式以唯讀方式回報已有的非空白單一父 Commit，其 HEAD 必須尚未納入本機可見的
+canonical ref。遠端狀態仍待確認。`created` 和 `existing` 的退出碼為 `0`，
+`refused` 和 `partial` 為 `1`，參數錯誤為 `2`。本機 Commit 只是 PUB 的第一個
+寫入階段，發布仍需要後續 Push 與共享事件。
+
 ## 步驟 3-8B：PUB 唯讀預檢
 
 在 Repository 內執行 `python -B groupctl.py pub --preflight --person-id student01`

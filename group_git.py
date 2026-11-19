@@ -10,13 +10,14 @@ class GitError(Exception):
     """Git state is unavailable or a Git command failed."""
 
 
-def _git(root, *args, allowed=(0,)):
+def _git(root, *args, allowed=(0,), env_overrides=None, input_bytes=None):
     env = os.environ.copy()
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
+    env.update(env_overrides or {})
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", *args], cwd=root, env=env,
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=30, input=input_bytes,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitError(f"Cannot run git {' '.join(args)}: {exc}") from exc

@@ -11,13 +11,14 @@ from group_sync import discover
 from group_update import update
 from group_test import run_tests
 from group_pub import preflight
+from group_pub_commit import work_commit
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
 )
 
 
-class ConfigError(Exception):
+class ConfigError(ValueError):
     """A configuration cannot be read or violates the repository contract."""
 
 
@@ -71,14 +72,37 @@ def main(argv=None):
     modes.add_argument('--update', action='store_true')
     test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
-    pub = commands.add_parser('pub', help='Read-only local publication preflight')
-    pub.add_argument('--preflight', action='store_true', required=True)
+    pub = commands.add_parser('pub', help='Local publication preflight or work commit')
+    modes = pub.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--preflight', action='store_true')
+    modes.add_argument('--work-commit', action='store_true')
+    modes.add_argument('--use-existing', action='store_true')
     pub.add_argument('--person-id', required=True, help='Explicit configured member person_id')
+    pub.add_argument('--expected-head', help='Full reviewed HEAD object ID')
+    pub.add_argument('--expected-branch', help='Reviewed personal branch name')
+    pub.add_argument('--file', action='append', help='Literal repository-relative file; repeat to select multiple files')
+    pub.add_argument('--message', help='Work commit message')
+    pub.add_argument('--confirm-reviewed', action='store_true',
+                     help='Confirm human authorization and review of the actual contribution')
     args = parser.parse_args(argv)
+    if args.command == 'pub':
+        commit_options = (args.expected_head, args.expected_branch, args.file, args.message)
+        if args.preflight and (any(value is not None for value in commit_options) or args.confirm_reviewed):
+            pub.error('work commit options cannot be used with --preflight')
+        if not args.preflight and not (args.expected_head and args.expected_branch and args.confirm_reviewed):
+            pub.error('work commit modes require --expected-head, --expected-branch and --confirm-reviewed')
+        if args.work_commit and not (args.file and args.message and args.message.strip()):
+            pub.error('--work-commit requires --file and a nonblank --message')
+        if args.use_existing and (args.file is not None or args.message is not None):
+            pub.error('--use-existing selects the reviewed HEAD and does not accept --file or --message')
     # Resolve from the invocation directory, never from the installed tool.
     path = Path.cwd() / ".group" / "group.json"
     try:
         if args.command == 'pub':
+            if not args.preflight:
+                report = work_commit(Path.cwd(), load_config, args)
+                print(json.dumps(report, indent=2, ensure_ascii=True))
+                return int(report['result'] not in ('created', 'existing'))
             root = repository_root(Path.cwd())
             report = preflight(root, load_config(root / '.group' / 'group.json'), args.person_id)
             print(json.dumps(report, indent=2, ensure_ascii=True))
