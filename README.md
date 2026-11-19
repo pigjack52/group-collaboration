@@ -1,5 +1,13 @@
 # Group Collaboration System
 
+## 步驟 3-7D-2C：AI 代理的 TEST 工程指引
+
+Repository 根目錄的 [AGENTS.md](AGENTS.md) 是 `TEST [scope]` 的操作指引。
+請讓 Codex 或其他 AI 代理在收到 `TEST` 時先讀取此檔。若代理未自動載入 Repository 指引，
+可直接輸入「先讀 AGENTS.md，再執行 TEST current」。
+指引涵蓋受測 Commit、驗證探索、預期結果依據、失敗調查、人工驗證與事件狀態。
+以下 `groupctl test` 提供目前乾淨 HEAD 的 unittest 與本機事件紀錄，工程判斷依指引完成。
+
 ## 步驟 3-7B：TEST 最小本機機械支援
 
 ```powershell
@@ -167,7 +175,7 @@ AI-assisted collaboration through GitHub.
 
 `SYNC`、`PUB`、`INT`、`REV`、`TEST`、`STATUS`、`FINAL`
 是規格定義的人對 AI 指令，本階段尚未實作其程序，也未提供對應 CLI。
-事件、同步、發布、整合、審查、測試結果發布、最終報告與可攜式 agent 指引均待後續實作。
+當時事件、同步、發布、整合、審查、測試結果發布、最終報告與可攜式 agent 指引仍待後續實作。
 
 ## Windows PowerShell 安裝與使用
 
