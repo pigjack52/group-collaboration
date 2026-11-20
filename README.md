@@ -1,5 +1,34 @@
 # Group Collaboration System
 
+## 步驟 3-9B：INT 候選查證與安全預檢
+
+```powershell
+python -B groupctl.py int --preflight --person-id student01 --change-id C-17 --target-branch people/student01/my-topic
+```
+
+指定已登錄的操作者、change ID 及完整本機分支名稱。預檢只讀取本機 Git 資料，從
+canonical 和 `people/*` 的 `origin` tracking ref tip 掃描事件，包含先前已讀的事件。
+若需刷新遠端資料，請另行執行 `sync --discover`。tracking refs 可能過期。
+
+以事件 ID、路徑與 blob 核對來源，相同事件跨 ref 時保留各來源證據，同一 change 有矛盾
+或同一事件 ID 有不同 blob 時拒絕選取。宣告的工作 SHA 必須唯一解析為 Git Commit，
+並且可從宣告的個人來源分支 tip 到達。JSON 保留來源 ref、tip SHA、事件 ID、路徑、
+blob SHA、目標 SHA 及祖先關係。多 Commit 貢獻的 `files_changed` 仍須依實際範圍審閱。
+
+目標須為操作者的個人分支或配置的 canonical 分支，且已在目前工作目錄開啟，預檢
+才會判定目標可供下一步審閱。若目標存在但目前工作目錄在其他分支，仍可回報目標
+SHA 和祖先證據，工作樹狀態只反映目前工作目錄。
+
+| `status` | 意義 | 退出碼 |
+| --- | --- | --- |
+| `review_required` | Git 歷史尚未包含候選，可開始審閱實際 diff、介面、假設與驗證計畫 | 0 |
+| `history_contains_candidate` | Git 歷史已包含候選，語意與目前行為仍須核對 | 0 |
+| `insufficient_evidence` | 來源、事件或 Git 物件證據不足 | 1 |
+| `candidate_conflict` | 候選有矛盾，需要操作者確認 | 1 |
+| `target_unsafe` | 目標或工作目錄狀態阻擋下一步 | 1 |
+
+參數錯誤的退出碼為 2。預檢不 fetch、不切換分支、不合併或寫入事件。
+
 ## 步驟 3-8D-2：PUB 事件 Push 與遠端驗證
 
 先以 `--push-work` 推送工作 Commit A，再用 `--event-commit` 建立本機事件 Commit E。

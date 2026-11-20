@@ -14,6 +14,28 @@ def refs(root):
                 if not line.startswith('refs/remotes/origin/HEAD '))
 
 
+def event_entries(root, tip):
+    tree, _ = _git(root, '--no-replace-objects', 'ls-tree', '-r', '-z', tip,
+                   '--', '.group/events/')
+    for entry in filter(None, tree.split('\0')):
+        meta, path = entry.split('\t', 1)
+        if path.endswith('.json'):
+            mode, kind, blob = meta.split()
+            yield path, mode, kind, blob
+
+
+def read_discovered_event(root, path, mode, kind, blob, group_id):
+    if mode not in ('100644', '100755') or kind != 'blob':
+        raise EventError('event must be a regular Git blob')
+    raw, _ = _git(root, '--no-replace-objects', 'cat-file', 'blob', blob)
+    event = parse_event(raw)
+    if path != f'.group/events/{event["event_id"]}.json':
+        raise EventError('event ID does not match filename')
+    if event['group_id'] != group_id:
+        raise EventError('group_id differs from group.json')
+    return event
+
+
 def discover(root, config):
     """Print progress before fetch; only acknowledge a complete scan atomically."""
     root = Path(root)
@@ -77,23 +99,11 @@ def discover(root, config):
         for ref, tip in sorted(new.items()):
             if ref != canonical and not ref.startswith('refs/remotes/origin/people/'):
                 continue
-            tree, _ = _git(root, 'ls-tree', '-r', '-z', tip, '--', '.group/events/')
-            for entry in filter(None, tree.split('\0')):
-                meta, path = entry.split('\t', 1)
-                if not path.endswith('.json'):
-                    continue
-                mode, kind, blob = meta.split()
+            for path, mode, kind, blob in event_entries(root, tip):
                 source = f'{ref}@{tip}:{path}'
                 try:
-                    if mode not in ('100644', '100755') or kind != 'blob':
-                        raise EventError('event must be a regular Git blob')
-                    raw, _ = _git(root, 'cat-file', 'blob', blob)
-                    event = parse_event(raw)
+                    event = read_discovered_event(root, path, mode, kind, blob, config['group_id'])
                     identifier = event['event_id']
-                    if path != f'.group/events/{identifier}.json':
-                        raise EventError('event ID does not match filename')
-                    if event['group_id'] != config['group_id']:
-                        raise EventError('group_id differs from group.json')
                     fingerprint = json.dumps(event, sort_keys=True, ensure_ascii=True)
                     prior = records.get(identifier, seen.get(identifier))
                     if prior is not None and prior != fingerprint:

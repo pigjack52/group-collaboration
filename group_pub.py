@@ -71,6 +71,45 @@ def preflight(root, config, person_id):
     elif not owner_matches:
         blockers.append('Personal branch owner differs from person_id.')
 
+    safety, safety_blockers = index_safety(root)
+    blockers.extend(safety_blockers)
+
+    upstream = state.upstream
+    if branch and upstream is None:
+        upstream, _ = _git(root, 'for-each-ref', '--format=%(upstream)', 'refs/heads/' + branch)
+        upstream = upstream or None
+    return {
+        'operation': 'pub_preflight',
+        'result': 'blocked' if blockers else 'review_required',
+        'facts': {
+            'group_id': group_id, 'person_id': person_id, 'member_descriptor': descriptor,
+            'branch': branch, 'personal_branch': personal, 'branch_owner_matches': owner_matches,
+            'canonical_branch': canonical, 'on_canonical': branch == canonical, 'head': state.head,
+            'staged': state.staged, 'unstaged': state.unstaged, 'untracked': state.untracked,
+            **safety,
+            'upstream': upstream, 'upstream_ref_available': state.upstream is not None,
+            'ahead': state.ahead, 'behind': state.behind,
+            'comparison': committed_range(root, state),
+            'external_filters_disabled': filters_disabled,
+        },
+        'blockers': blockers,
+        'review_required': [
+            'Select the contribution. Review staged (HEAD to index), unstaged (index to worktree), and untracked content.',
+            'Review the committed comparison and commit history, including paths changed and later reverted. Confirm the actual publication range independently.',
+            'Review generated files, interface changes, and assumptions. Determine and run applicable checks on the selected content.',
+        ],
+        'unverified': {
+            'remote_state': 'Local refs only; current remote refs and push destination unverified.',
+            'permissions': 'Operator authentication and remote write permission unverified.',
+            'secrets': 'No secret scan performed.',
+            'tests': 'No tests run or evidence validated.',
+            'publication': 'Mechanical preflight only; publication readiness and completion unverified.',
+        },
+    }
+
+
+def index_safety(root):
+    blockers = []
     operations = []
     for marker in MARKERS:
         location, _ = _git(root, 'rev-parse', '--git-path', marker)
@@ -101,36 +140,6 @@ def preflight(root, config, person_id):
     if hidden:
         blockers.append('Index flags may hide working-tree changes.')
 
-    upstream = state.upstream
-    if branch and upstream is None:
-        upstream, _ = _git(root, 'for-each-ref', '--format=%(upstream)', 'refs/heads/' + branch)
-        upstream = upstream or None
-    return {
-        'operation': 'pub_preflight',
-        'result': 'blocked' if blockers else 'review_required',
-        'facts': {
-            'group_id': group_id, 'person_id': person_id, 'member_descriptor': descriptor,
-            'branch': branch, 'personal_branch': personal, 'branch_owner_matches': owner_matches,
-            'canonical_branch': canonical, 'on_canonical': branch == canonical, 'head': state.head,
-            'staged': state.staged, 'unstaged': state.unstaged, 'untracked': state.untracked,
-            'unmerged_paths': sorted(conflicts), 'git_operations': operations,
-            'hidden_index_flags': hidden, 'index_lock_present': index_lock_present,
-            'upstream': upstream, 'upstream_ref_available': state.upstream is not None,
-            'ahead': state.ahead, 'behind': state.behind,
-            'comparison': committed_range(root, state),
-            'external_filters_disabled': filters_disabled, 'submodule_worktrees_not_inspected': sorted(submodules),
-        },
-        'blockers': blockers,
-        'review_required': [
-            'Select the contribution. Review staged (HEAD to index), unstaged (index to worktree), and untracked content.',
-            'Review the committed comparison and commit history, including paths changed and later reverted. Confirm the actual publication range independently.',
-            'Review generated files, interface changes, and assumptions. Determine and run applicable checks on the selected content.',
-        ],
-        'unverified': {
-            'remote_state': 'Local refs only; current remote refs and push destination unverified.',
-            'permissions': 'Operator authentication and remote write permission unverified.',
-            'secrets': 'No secret scan performed.',
-            'tests': 'No tests run or evidence validated.',
-            'publication': 'Mechanical preflight only; publication readiness and completion unverified.',
-        },
-    }
+    return dict(unmerged_paths=sorted(conflicts), git_operations=operations,
+                hidden_index_flags=hidden, index_lock_present=index_lock_present,
+                submodule_worktrees_not_inspected=sorted(submodules)), blockers

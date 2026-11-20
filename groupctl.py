@@ -9,6 +9,7 @@ from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
+from group_int import preflight as int_preflight
 from group_test import run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
@@ -73,6 +74,11 @@ def main(argv=None):
     modes = sync.add_mutually_exclusive_group(required=True)
     modes.add_argument('--discover', action='store_true')
     modes.add_argument('--update', action='store_true')
+    integration = commands.add_parser('int', help='Inspect a published change and local integration target')
+    integration.add_argument('--preflight', action='store_true', required=True)
+    integration.add_argument('--person-id', required=True)
+    integration.add_argument('--change-id', required=True)
+    integration.add_argument('--target-branch', required=True, help='Exact local target branch name')
     test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
     pub = commands.add_parser('pub', help='Publication preflight, commit and push work or events')
@@ -144,6 +150,11 @@ def main(argv=None):
                 return int(report['result'] not in ('created', 'existing'))
             root = repository_root(Path.cwd())
             report = preflight(root, load_config(root / '.group' / 'group.json'), args.person_id)
+            print(json.dumps(report, indent=2, ensure_ascii=True))
+            return int(bool(report['blockers']))
+        if args.command == 'int':
+            report = int_preflight(Path.cwd(), load_config, args.person_id,
+                                   args.change_id, args.target_branch)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'test':
