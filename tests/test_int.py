@@ -544,3 +544,178 @@ class IntPreflightTests(unittest.TestCase):
         args.remove('--confirm-unproposed')
         self.ff(args, 'blocked', '--confirm-unproposed')
         self.ff([*args, '--confirm-unproposed'], 'pending_commit')
+
+    def inspect_args(self, **overrides):
+        args = self.ff_args(**overrides)
+        args[1] = '--inspect-merge'
+        return args
+
+    def inspect_pending(self, args, status, evidence='reviewed_evidence_matches'):
+        before = self.snapshot()
+        result = subprocess.run([sys.executable, '-B', str(test_pub.CLI), *args],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, encoding='utf-8', timeout=45)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(result.returncode, int(status != 'awaiting_human_confirmation'),
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['status'], status, report)
+        self.assertEqual(report['evidence_status'], evidence, report)
+        self.assertTrue(report['state_verified'], report)
+        return report
+
+    def test_inspect_conflict_partial_and_all_resolutions_are_read_only(self):
+        unusual = '衝突 name #.txt'
+        self.git('switch', SOURCE)
+        (self.root / unusual).write_bytes(b'candidate\n')
+        self.work = self.commit('add candidate file')
+        self.tip = self.record(dict(self.event, commit=self.work))
+        self.git('update-ref', SOURCE_REF, self.tip)
+        self.git('switch', TARGET)
+        self.file.write_bytes(b'target\n')
+        (self.root / unusual).write_bytes(b'target added file\n')
+        head = self.commit('diverge on both paths')
+        args = self.inspect_args(expected_head=head)
+        self.ff(self.prepare_args(expected_head=head), 'conflicted')
+        facts = self.inspect_pending(args, 'conflicted')['git_state']
+        self.assertEqual(facts['head'], head)
+        self.assertEqual(facts['merge_heads'], [self.work])
+        for path, sides in (('tracked.txt', [(1, self.base), (2, head), (3, self.work)]),
+                            (unusual, [(2, head), (3, self.work)])):
+            self.assertEqual(facts['conflicts'][path], [
+                dict(stage=stage, mode='100644', object_id=self.git('rev-parse', f'{commit}:{path}'))
+                for stage, commit in sides
+            ])
+        self.file.write_bytes(b'resolved first\n')
+        self.git('add', '--', 'tracked.txt')
+        facts = self.inspect_pending(args, 'conflicted')['git_state']
+        self.assertEqual(facts['unmerged_paths'], [unusual])
+        (self.root / unusual).write_bytes(b'resolved second\n')
+        self.git('add', '--', unusual)
+        report = self.inspect_pending(args, 'awaiting_human_confirmation')
+        self.assertEqual(report['git_state']['unmerged_paths'], [])
+        self.assertEqual(report['git_state']['merge_heads'], [self.work])
+        self.assertEqual(report['git_state']['head'], head)
+
+    def test_inspect_modify_delete_and_staged_marker_check(self):
+        self.git('rm', '--', 'tracked.txt')
+        head = self.commit('remove target file')
+        self.ff(self.prepare_args(expected_head=head), 'conflicted')
+        args = self.inspect_args(expected_head=head)
+        facts = self.inspect_pending(args, 'conflicted')['git_state']
+        self.assertEqual([item['stage'] for item in facts['conflicts']['tracked.txt']], [1, 3])
+        self.file.write_bytes(b'<<<<<<< HEAD\ncontent\n=======\nother\n>>>>>>> work\n')
+        self.git('add', '--', 'tracked.txt')
+        report = self.inspect_pending(args, 'blocked')
+        self.assertEqual(report['git_state']['unmerged_paths'], [])
+        self.assertNotEqual(report['staged_diff_check']['exit_code'], 0)
+        self.git('rm', '-f', '--', 'tracked.txt')
+        self.inspect_pending(args, 'awaiting_human_confirmation')
+
+    def test_inspect_missing_and_mismatched_evidence(self):
+        head = self.diverge()
+        self.ff(self.prepare_args(expected_head=head), 'pending_commit')
+        basic = ['int', '--inspect-merge', '--person-id', 'P01',
+                 '--change-id', 'C-int', '--target-branch', TARGET]
+        self.inspect_pending(basic, 'blocked', 'insufficient_evidence')
+        for overrides in (dict(expected_head=self.base), dict(work_sha=self.base),
+                          dict(expected_event_id='E-wrong'), dict(expected_event_blob=self.work),
+                          dict(expected_source_tip=self.work), dict(change_id='C-wrong'),
+                          dict(expected_incoming='none')):
+            with self.subTest(overrides=overrides):
+                self.inspect_pending(self.inspect_args(**(dict(expected_head=head) | overrides)),
+                                     'blocked', 'evidence_mismatch')
+
+    def test_inspect_diagnostic_mode_following_conflict(self):
+        head = self.diverge(conflict=True)
+        self.ff(self.prepare_args(expected_head=head), 'conflicted')
+        args = ['int', '--inspect-merge', '--person-id', 'P01',
+                '--change-id', 'C-unverified', '--target-branch', TARGET]
+        report = self.inspect_pending(args, 'conflicted', 'insufficient_evidence')
+        self.assertEqual(report['git_state']['unmerged_paths'], ['tracked.txt'])
+        self.assertNotIn('reviewed_evidence', report)
+
+    def test_inspect_rejects_duplicate_event_for_same_work(self):
+        head = self.diverge()
+        self.git('switch', '-c', 'people/P02/alternative', SOURCE)
+        tip = self.record(dict(self.event, event_id='E-duplicate'))
+        self.git('switch', TARGET)
+        self.ff(self.prepare_args(expected_head=head), 'pending_commit')
+        args = self.inspect_args(expected_head=head)
+        self.git('update-ref', 'refs/remotes/origin/people/P02/alternative', tip)
+        report = self.inspect_pending(args, 'blocked', 'evidence_mismatch')
+        self.assertIn('Conflicting candidate events', ' '.join(report['blockers']))
+
+    def test_inspect_blocks_dirty_paths_and_hidden_flags_after_staging(self):
+        head = self.diverge()
+        args = self.inspect_args(expected_head=head)
+        self.ff(self.prepare_args(expected_head=head), 'pending_commit')
+        self.file.write_bytes(b'unstaged\n')
+        extra = self.root / 'untracked.txt'
+        extra.write_bytes(b'untracked\n')
+        facts = self.inspect_pending(args, 'blocked')['git_state']
+        self.assertEqual(facts['unstaged'], ['tracked.txt'])
+        self.assertEqual(facts['untracked'], ['untracked.txt'])
+        self.git('update-index', '--assume-unchanged', 'tracked.txt')
+        facts = self.inspect_pending(args, 'blocked', 'unverified')['git_state']
+        self.assertEqual(facts['hidden_index_flags'][0]['path'], 'tracked.txt')
+
+    def test_inspect_refuses_protected_or_wrong_targets(self):
+        for person, branch in (('P01', 'main'), ('P01', SOURCE), ('P02', TARGET)):
+            self.inspect_pending(self.inspect_args(person_id=person, target_branch=branch),
+                                 'blocked', 'unverified')
+        config = self.root / '.group/group.json'
+        group = json.loads(config.read_text(encoding='utf-8'))
+        group['canonical_branch'] = TARGET
+        config.write_text(json.dumps(group), encoding='utf-8')
+        self.inspect_pending(self.inspect_args(), 'blocked', 'unverified')
+
+    def test_inspect_no_pending_merge_and_inconsistent_markers(self):
+        args = self.inspect_args()
+        self.inspect_pending(args, 'no_pending_merge', 'unverified')
+        marker = self.root / '.git/MERGE_HEAD'
+        marker.write_text(f'{self.work}\n{self.base}\n', encoding='ascii')
+        self.inspect_pending(args, 'blocked', 'unverified')
+        marker.write_text(f'{self.work}\n', encoding='ascii')
+        for name in ('index.lock', 'CHERRY_PICK_HEAD', 'MERGE_AUTOSTASH'):
+            path = marker.with_name(name)
+            path.write_text(self.work, encoding='ascii')
+            self.inspect_pending(args, 'blocked', 'unverified')
+            path.unlink()
+
+    def test_inspect_detects_concurrent_index_ref_marker_and_worktree_changes(self):
+        from argparse import Namespace
+
+        head = self.diverge()
+        self.ff(self.prepare_args(expected_head=head), 'pending_commit')
+        extra = self.root / 'extra.txt'
+        extra.write_bytes(b'first\n')
+        original = group_int.inspect_merge_snapshot
+        args = Namespace(confirm_reviewed=False, person_id='P01', change_id='C-int', target_branch=TARGET)
+        for mutate in (
+            lambda: extra.write_bytes(b'other\n'),
+            lambda: self.git('add', '--', 'extra.txt'),
+            lambda: self.git('update-ref', 'refs/heads/unrelated', head),
+            lambda: (self.root / '.git/MERGE_HEAD').write_text(f'{self.base}\n', encoding='ascii'),
+        ):
+            def observe_then_mutate(root):
+                result = original(root)
+                if spy.call_count == 1:
+                    mutate()
+                return result
+
+            with patch('group_int.inspect_merge_snapshot', side_effect=observe_then_mutate) as spy:
+                report = group_int.inspect_merge(self.root, groupctl.load_config, args)
+            self.assertEqual(report['status'], 'blocked', report)
+            self.assertFalse(report['state_verified'], report)
+            self.assertIn('Git state changed during inspection', ' '.join(report['blockers']))
+
+    def test_inspect_cli_rejects_partial_malformed_and_nonexclusive_options(self):
+        args = self.inspect_args()
+        for invalid in ([*args, '--preflight'], [*args, '--ff-only'], [*args, '--prepare-merge'],
+                        args[:-2], self.inspect_args(work_sha='abcd'),
+                        [arg for arg in args if arg != '--confirm-reviewed']):
+            with self.subTest(args=invalid):
+                result = subprocess.run([sys.executable, '-B', str(test_pub.CLI), *invalid],
+                                        cwd=self.root, env=self.env, capture_output=True, timeout=45)
+                self.assertEqual(result.returncode, 2, result.stderr)

@@ -1,5 +1,45 @@
 # Group Collaboration System
 
+## 步驟 3-9C-4：INT 唯讀衝突診斷與重查
+
+在待提交 Merge 的目標個人分支上執行。只提供身分、change ID 和目標分支時，
+工具會列出 Git 現場，並回報 `evidence_status: insufficient_evidence`。
+
+```powershell
+python -B groupctl.py int --inspect-merge --person-id student01 --change-id C-17 `
+  --target-branch people/student01/my-topic
+```
+
+要核對先前審閱的候選，請帶入同一次 `--prepare-merge` 的原始參數和保存的
+JSON 診斷所對應的完整證據。未提議整合的事件另需 `--confirm-unproposed`。
+
+```powershell
+python -B groupctl.py int --inspect-merge --person-id student01 --change-id C-17 `
+  --target-branch people/student01/my-topic --expected-head $targetSha --work-sha $workSha `
+  --expected-event-id $eventId --expected-event-blob $eventBlobSha `
+  --expected-source-ref $sourceRef --expected-source-tip $sourceTipSha `
+  --expected-incoming ($reviewedCommits -join ',') --confirm-reviewed
+```
+
+JSON 的 `git_state.conflicts` 依路徑列出 index stages、mode 和 object ID。
+Stage 1 是共同基底，2 是目標方，3 是來源方。新增或刪除衝突可能缺少某些 stage。
+人工審閱兩側內容，逐檔解決並用 `git add -- <path>` 暫存，再重跑同一條命令。
+用 `git diff --cached --no-ext-diff --no-textconv` 審閱完整暫存結果。
+暫存差異的衝突標記及空白檢查是輔助診斷，未合併 stages 決定 Git 是否仍有衝突。
+
+| 狀態 | 意義 | 退出碼 |
+| --- | --- | --- |
+| `conflicted` | 仍有 unmerged stages，事件審閱結果另看 `evidence_status` | 1 |
+| `blocked` | 證據、目標、工作樹或現場一致性檢查有阻礙 | 1 |
+| `awaiting_human_confirmation` | 審閱證據相符，Git 衝突已解除，暫存結果等待人工確認 | 0 |
+| `no_pending_merge` | 現場沒有待提交 Merge，原因未確認 | 1 |
+
+部分證據或無效的命令列參數回傳 2。`reviewed_evidence_matches` 表示目前 Git 現場
+與提供的證據相符。若原始資料遺失，仍可診斷，但相同的 HEAD、MERGE_HEAD
+也可能來自另一次 Merge，無法由它們追溯原始事件或審閱紀錄。來源 ref 使用
+本機 tracking 資料，遠端新鮮度未知。檢查期間請暫停外部 Git、IDE 及其他寫入。
+這是唯讀操作。即使退出碼為 0，也仍待人工決定是否提交，且尚待建置、測試與語意審查。
+
 ## 步驟 3-9C-3：INT 準備非 Fast-forward Merge
 
 先用 `int --preflight` 查證候選，再依下方 Fast-forward 範例核對相同的審閱資料。
@@ -13,7 +53,7 @@ python -B groupctl.py int --prepare-merge --person-id student01 --change-id C-17
   --expected-incoming ($reviewedCommits -join ',') --confirm-reviewed
 ```
 
-三個 INT 模式互斥。若 T 是 A 的祖先，使用 `--ff-only`。若 A 已在 T 的歷史中，
+INT 模式互斥。若 T 是 A 的祖先，使用 `--ff-only`。若 A 已在 T 的歷史中，
 回傳 `already_in_history`，退出碼為 0。Git 的非 Fast-forward Merge 可能覆寫 ignored
 檔案，因此準備前也會拒絕 ignored 的未追蹤路徑，包括工作目錄裡的 `.group/local/` 資料。
 INT 互斥鎖只協調本工具，執行期間須暫停外部 Git 與 IDE 寫入。

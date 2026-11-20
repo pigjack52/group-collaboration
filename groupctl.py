@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 from group_events import EventError, load_event, read_event, list_events, write_event
@@ -9,7 +10,7 @@ from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
-from group_int import fast_forward, prepare_merge, preflight as int_preflight
+from group_int import fast_forward, inspect_merge, prepare_merge, preflight as int_preflight
 from group_test import run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
@@ -79,6 +80,7 @@ def main(argv=None):
     modes.add_argument('--preflight', action='store_true')
     modes.add_argument('--ff-only', action='store_true')
     modes.add_argument('--prepare-merge', action='store_true')
+    modes.add_argument('--inspect-merge', action='store_true', help='Diagnose a pending merge without writing')
     integration.add_argument('--person-id', required=True)
     integration.add_argument('--change-id', required=True)
     integration.add_argument('--target-branch', required=True, help='Exact local target branch name')
@@ -122,9 +124,19 @@ def main(argv=None):
         if (args.ff_only or args.prepare_merge) and not (all(reviewed) and args.confirm_reviewed):
             mode = '--ff-only' if args.ff_only else '--prepare-merge'
             integration.error(f'{mode} requires all reviewed evidence options and --confirm-reviewed')
-        if args.preflight and (any(value is not None for value in reviewed)
-                               or args.confirm_reviewed or args.confirm_unproposed):
-            integration.error('Reviewed evidence options require --ff-only or --prepare-merge')
+        has_evidence = (any(value is not None for value in reviewed)
+                        or args.confirm_reviewed or args.confirm_unproposed)
+        if args.preflight and has_evidence:
+            integration.error('Reviewed evidence options require --ff-only, --prepare-merge or --inspect-merge')
+        if args.inspect_merge and has_evidence:
+            if not (all(reviewed) and args.confirm_reviewed):
+                integration.error('--inspect-merge requires the complete reviewed evidence or none')
+            oids = [args.expected_head, args.work_sha, args.expected_event_blob,
+                    args.expected_source_tip]
+            if args.expected_incoming != 'none':
+                oids.extend(args.expected_incoming.split(','))
+            if any(not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', oid) for oid in oids):
+                integration.error('--inspect-merge evidence requires full hexadecimal object IDs')
     if args.command == 'pub':
         push_options = (args.remote, args.expected_url, args.expected_remote_head)
         event_options = (args.work_sha, args.change_id, args.review_file)
@@ -179,6 +191,8 @@ def main(argv=None):
                 report = fast_forward(Path.cwd(), load_config, args)
             elif args.prepare_merge:
                 report = prepare_merge(Path.cwd(), load_config, args)
+            elif args.inspect_merge:
+                report = inspect_merge(Path.cwd(), load_config, args)
             else:
                 report = int_preflight(Path.cwd(), load_config, args.person_id,
                                        args.change_id, args.target_branch)

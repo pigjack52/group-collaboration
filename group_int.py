@@ -1,13 +1,17 @@
 """Resolve a published change and inspect a local integration target."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import stat
 
 from group_events import EventError
 from group_git import GitError, _git, inspect_status, repository_root
 from group_pub import index_safety, status_config
 from group_status import StatusError, read_members
 from group_sync import event_entries, read_discovered_event
+from group_test import MARKERS
 
 
 TRACKING = 'refs/remotes/origin/'
@@ -303,28 +307,9 @@ def apply_integration(root, load_config, args, report, *, prepare):
     if (checked['target_kind'] != 'personal' or args.target_branch.casefold() in
             {canonical.casefold(), 'main'} or personal_owner(args.target_branch) != args.person_id):
         raise GitError('INT writes require the operator-owned personal branch; canonical and main are refused.')
-    target, work = checked['target_ref'], checked['candidate_work_sha']
+    work = checked['candidate_work_sha']
     head = checked['target_sha']
-    evidence = checked['ancestry_evidence']
-    event_path = f'.group/events/{args.expected_event_id}.json'
-    expected = dict(change_id=args.change_id, event_id=args.expected_event_id, event_path=event_path,
-                    event_blob_sha=args.expected_event_blob.lower(), candidate_work_sha=args.work_sha.lower(),
-                    source_ref=args.expected_source_ref, source_tip_sha=args.expected_source_tip.lower())
-    observed = dict(checked, **evidence, change_id=checked['candidate_event']['change_id'])
-    mismatches = [field for field, value in expected.items() if observed[field] != value]
-    if mismatches:
-        raise GitError('Reviewed evidence changed: ' + ', '.join(mismatches))
-    publication = dict(ref=expected['source_ref'], tip_sha=expected['source_tip_sha'],
-                       event_path=event_path, event_blob_sha=expected['event_blob_sha'])
-    if publication not in checked['source_refs']:
-        raise GitError('Reviewed event must be present at the declared source tracking tip.')
-    if not checked['candidate_event']['proposed_for_integration'] and not args.confirm_unproposed:
-        raise GitError('Publication is not proposed for integration; --confirm-unproposed is required.')
-    paths, _ = _git(root, *GIT, 'diff-tree', '--root', '-m', '-r', '--no-commit-id',
-                    '--no-renames', '--name-only', '-z', work, '--')
-    paths = list(filter(None, paths.split('\0')))
-    if event_path in paths or (paths and all(path.startswith('.group/events/') for path in paths)):
-        raise GitError('Candidate appears to be an event commit; expected a work commit.')
+    verify_reviewed_candidate(root, args, checked)
     options = write_safety(root, work)
     old = args.expected_head.lower()
     if len(old) != len(head) or not re.fullmatch(r'[0-9a-f]+', old):
@@ -344,9 +329,45 @@ def apply_integration(root, load_config, args, report, *, prepare):
         raise GitError('Expected target HEAD is stale.')
     incoming = incoming_commits(root, old, work)
     report['incoming_commits'] = incoming
+    verify_incoming(args, incoming)
+    run_integration(root, args, report, prepare, before_refs, checked, options, canonical)
+
+
+def verify_reviewed_candidate(root, args, checked):
+    evidence = checked['ancestry_evidence']
+    work = checked['candidate_work_sha']
+    event_path = f'.group/events/{args.expected_event_id}.json'
+    expected = dict(change_id=args.change_id, event_id=args.expected_event_id, event_path=event_path,
+                    event_blob_sha=args.expected_event_blob.lower(), candidate_work_sha=args.work_sha.lower(),
+                    source_ref=args.expected_source_ref, source_tip_sha=args.expected_source_tip.lower())
+    observed = dict(checked, **evidence, change_id=checked['candidate_event']['change_id'])
+    mismatches = [field for field, value in expected.items() if observed[field] != value]
+    if mismatches:
+        raise GitError('Reviewed evidence changed: ' + ', '.join(mismatches))
+    publication = dict(ref=expected['source_ref'], tip_sha=expected['source_tip_sha'],
+                       event_path=event_path, event_blob_sha=expected['event_blob_sha'])
+    if publication not in checked['source_refs']:
+        raise GitError('Reviewed event must be present at the declared source tracking tip.')
+    if not checked['candidate_event']['proposed_for_integration'] and not args.confirm_unproposed:
+        raise GitError('Publication is not proposed for integration; --confirm-unproposed is required.')
+    paths, _ = _git(root, *GIT, 'diff-tree', '--root', '-m', '-r', '--no-commit-id',
+                    '--no-renames', '--name-only', '-z', work, '--')
+    paths = list(filter(None, paths.split('\0')))
+    if event_path in paths or (paths and all(path.startswith('.group/events/') for path in paths)):
+        raise GitError('Candidate appears to be an event commit; expected a work commit.')
+
+
+def verify_incoming(args, incoming):
     reviewed = [] if args.expected_incoming == 'none' else args.expected_incoming.lower().split(',')
     if sorted(reviewed) != incoming:
         raise GitError('Incoming commit range differs from the reviewed T..A list.')
+    return incoming
+
+
+def run_integration(root, args, report, prepare, before_refs, checked, options, canonical):
+    target, head = checked['target_ref'], checked['target_sha']
+    work = checked['candidate_work_sha']
+    evidence = checked['ancestry_evidence']
     if not evidence['work_is_ancestor_of_target']:
         linear = ancestor(root, head, work)
         if prepare:
@@ -419,3 +440,225 @@ def verify_pending_merge(root, target, head, work, report):
     _git(root, *GIT, 'diff', '--cached', '--no-ext-diff', '--no-textconv', head, '--')
     report['review_command'] = 'git diff --cached --no-ext-diff --no-textconv'
     report['status'] = 'pending_commit'
+
+
+def git_path(root, name):
+    path, _ = _git(root, 'rev-parse', '--git-path', name)
+    return root / path
+
+
+def file_fingerprint(path):
+    """Compare file contents even if a second edit leaves the same status codes."""
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return info.st_mode, os.readlink(path)
+    if stat.S_ISREG(info.st_mode):
+        with path.open('rb') as stream:
+            return info.st_mode, hashlib.file_digest(stream, 'sha256').hexdigest()
+    return info.st_mode, info.st_mtime_ns
+
+
+def inspect_merge_snapshot(root):
+    options, filters_disabled = status_config(root)
+    refs = all_refs(root)
+    head_ref, _ = _git(root, 'symbolic-ref', '--no-recurse', '--quiet', 'HEAD', allowed=(0, 1))
+    head, _ = _git(root, *GIT, 'rev-parse', '--verify', 'HEAD^{commit}', allowed=(0, 128))
+    # ort can create AUTO_MERGE as part of the current merge.
+    operation_names = (*MARKERS, 'MERGE_AUTOSTASH', 'AUTO_MERGE', 'REBASE_HEAD', 'BISECT_START')
+    metadata_names = ('MERGE_MSG', 'MERGE_MODE', 'ORIG_HEAD', 'AUTO_MERGE')
+    names = dict.fromkeys((*operation_names, *metadata_names, 'index', 'groupctl-int.lock'))
+    paths, _ = _git(root, 'rev-parse', *(arg for name in names for arg in ('--git-path', name)))
+    locations = {name: root / path for name, path in zip(names, paths.split('\n'), strict=True)}
+    try:
+        marker = locations['MERGE_HEAD'].read_bytes()
+    except FileNotFoundError:
+        marker = None
+    merge_heads = [] if marker is None else marker.decode('ascii', errors='replace').splitlines()
+    operations = [name for name in operation_names if locations[name].exists()]
+    index = locations['index']
+    index_lock = index.with_name(index.name + '.lock').exists()
+    int_lock = locations['groupctl-int.lock'].exists()
+    index_state = {suffix: file_fingerprint(index.with_name(index.name + suffix))
+                   for suffix in ('', '.lock')}
+    shared_index, _ = _git(root, 'rev-parse', '--shared-index-path')
+    if shared_index:
+        index_state['shared'] = file_fingerprint(root / shared_index)
+    raw, _ = _git(root, 'ls-files', '--stage', '-z')
+    conflicts, submodules = {}, set()
+    for entry in filter(None, raw.split('\0')):
+        metadata, path = entry.split('\t', 1)
+        mode, oid, stage = metadata.split()
+        if stage != '0':
+            conflicts.setdefault(path, []).append(dict(stage=int(stage), mode=mode, object_id=oid))
+        if mode == '160000':
+            submodules.add(path)
+    flags, _ = _git(root, 'ls-files', '-v', '-z')
+    hidden = [dict(path=entry[2:], flag=entry[0]) for entry in filter(None, flags.split('\0'))
+              if entry[0].islower() or entry[0] == 'S']
+    raw_status, _ = _git(root, *GIT, *options, 'status', '--porcelain=v1', '-z',
+                         '--no-renames', '--untracked-files=all', '--ignored',
+                         '--ignore-submodules=all')
+    staged, unstaged, untracked, ignored = [], [], [], []
+    for entry in filter(None, raw_status.split('\0')):
+        xy, path = entry[:2], entry[3:]
+        if xy == '??':
+            untracked.append(path)
+        elif xy == '!!':
+            ignored.append(path)
+        elif path not in conflicts:
+            if xy[0] != ' ':
+                staged.append(path)
+            if xy[1] != ' ':
+                unstaged.append(path)
+    working_files = {}
+    for path in sorted(set(staged + unstaged + untracked + ignored) | conflicts.keys()):
+        item = root / path
+        if not item.parent.resolve().is_relative_to(root):
+            raise GitError('Working-tree path escapes the repository.')
+        working_files[path] = file_fingerprint(item)
+    facts = dict(head_ref=head_ref or None, head=head or None, merge_heads=merge_heads,
+                 merge_head_present=marker is not None, git_operations=operations,
+                 index_lock_present=index_lock, int_lock_present=int_lock,
+                 hidden_index_flags=hidden, submodule_paths=sorted(submodules),
+                 staged=staged, unstaged=unstaged, untracked=untracked, ignored=ignored,
+                 unmerged_paths=sorted(conflicts), conflicts=conflicts)
+    metadata = {name: file_fingerprint(locations[name]) for name in metadata_names}
+    snapshot = dict(refs=refs, marker=marker, metadata=metadata, index=index_state,
+                    working_files=working_files, status_options=options, filters_disabled=filters_disabled)
+    return facts, snapshot
+
+
+def inspect_pending_evidence(root, args, config, members, facts, report):
+    head = facts['head']
+    work = facts['merge_heads'][0]
+    if (head, work) != (args.expected_head.lower(), args.work_sha.lower()):
+        raise GitError('Pending HEAD or MERGE_HEAD differs from the reviewed T/A.')
+    refs = ref_snapshot(root, config['canonical_branch'], facts['head_ref'])
+    checked = dict(target_sha=head, ancestry_evidence={}, blockers=[])
+    record = candidates(root, refs, config['group_id'], args.change_id, checked)
+    if checked['blockers'] or record is None:
+        raise EventError(' '.join(checked['blockers']))
+    inspect_candidate(root, record, refs, members, checked)
+    verify_reviewed_candidate(root, args, checked)
+    if checked['candidate_event']['branch'].casefold() == args.target_branch.casefold():
+        raise GitError('The source branch cannot be the inspection target.')
+    if (len(checked['ancestry_evidence']['target_work_merge_bases']) != 1
+            or ancestor(root, head, work) or ancestor(root, work, head)):
+        raise GitError('Reviewed T/A do not describe a supported non-fast-forward merge.')
+    report['reviewed_evidence'] = dict(
+        event_id=checked['event_id'], event_path=checked['event_path'],
+        event_blob_sha=checked['event_blob_sha'],
+        source_ref=args.expected_source_ref, source_tip_sha=args.expected_source_tip.lower(),
+        incoming_commits=verify_incoming(args, checked['incoming_commits']),
+        merge_base=checked['ancestry_evidence']['target_work_merge_bases'][0],
+    )
+
+
+def assess_pending_merge(root, load_config, args, report, facts, snapshot):
+    refs = snapshot['refs']
+    blockers = report['blockers']
+    target = 'refs/heads/' + args.target_branch
+    _git(root, 'check-ref-format', target)
+    config = load_config(root / '.group/group.json')
+    canonical = config['canonical_branch']
+    if (config['protocol_version'] != '0.1' or not isinstance(config['group_id'], str)
+            or not config['group_id'].strip() or not isinstance(canonical, str) or not canonical):
+        raise EventError('Invalid group configuration or unsupported protocol_version.')
+    _git(root, 'check-ref-format', 'refs/heads/' + canonical)
+    members = {member['person_id'] for member in read_members(root)}
+    head = facts['head']
+    if (args.person_id not in members or personal_owner(args.target_branch) != args.person_id
+            or args.target_branch.casefold() in {canonical.casefold(), 'main'}):
+        raise GitError('Inspection requires an operator-owned personal branch outside main and canonical.')
+    if not head or facts['head_ref'] != target or refs.get(target) != head + '\t':
+        raise GitError('The checked-out direct branch and HEAD must match the requested target.')
+    if snapshot['filters_disabled'] or facts['hidden_index_flags'] or facts['submodule_paths']:
+        raise GitError('External filters, hidden index flags or submodules prevent verification.')
+    if facts['index_lock_present'] or facts['int_lock_present']:
+        raise GitError('Index or INT write lock present.')
+    if set(facts['git_operations']) - {'MERGE_HEAD', 'AUTO_MERGE'}:
+        raise GitError('Another or unsupported Git operation is in progress.')
+    if not facts['merge_head_present']:
+        if facts['unmerged_paths'] or facts['git_operations']:
+            raise GitError('Merge-related state exists without MERGE_HEAD.')
+        report['status'] = 'no_pending_merge'
+        blockers.append('No pending merge. The reason for its absence is unverified.')
+        return
+    heads = facts['merge_heads']
+    if not re.fullmatch(rb'[0-9a-f]{' + str(len(head)).encode('ascii') + rb'}(?:\r?\n)?',
+                        snapshot['marker']):
+        raise GitError('MERGE_HEAD must contain exactly one complete commit object ID.')
+    kind, _ = _git(root, *GIT, 'cat-file', '-t', heads[0])
+    if kind != 'commit':
+        raise GitError('MERGE_HEAD does not identify a commit.')
+    committed_config, _ = _git(root, *GIT, 'show', head + ':.group/group.json')
+    committed_config = json.loads(committed_config.lstrip('\ufeff'))
+    original_canonical = committed_config['canonical_branch']
+    if not isinstance(original_canonical, str) or args.target_branch.casefold() == original_canonical.casefold():
+        raise GitError('The requested target is protected by the configuration at HEAD.')
+    if args.confirm_reviewed:
+        try:
+            if committed_config['group_id'] != config['group_id']:
+                raise EventError('The worktree group ID differs from the group ID at HEAD.')
+            shallow, _ = _git(root, 'rev-parse', '--is-shallow-repository')
+            if (shallow == 'true' or git_path(root, 'info/grafts').exists()
+                    or any(ref.startswith('refs/replace/') for ref in refs)):
+                raise GitError('Shallow, grafted or replaced history cannot establish INT evidence.')
+            inspect_pending_evidence(root, args, config, members, facts, report)
+        except (EventError, GitError) as exc:
+            report['evidence_status'] = 'evidence_mismatch'
+            blockers.append(str(exc))
+        else:
+            report['evidence_status'] = 'reviewed_evidence_matches'
+    else:
+        blockers.append('Original reviewed evidence was not supplied.')
+    if facts['unmerged_paths']:
+        report['status'] = 'conflicted'
+        blockers.append('Unmerged index stages remain.')
+        return
+    if facts['unstaged'] or facts['untracked'] or facts['ignored']:
+        blockers.append('Unstaged, untracked or ignored paths require review.')
+    check, code = _git(root, *GIT, *snapshot['status_options'], 'diff', '--cached', '--check',
+                       '--no-ext-diff', '--no-textconv', head, '--',
+                       allowed=(0, 2), include_stderr=True)
+    report['staged_diff_check'] = dict(exit_code=code, output=check)
+    if code:
+        blockers.append('Staged diff has conflict marker or whitespace diagnostics.')
+    if not blockers:
+        report['status'] = 'awaiting_human_confirmation'
+
+
+def inspect_merge(directory, load_config, args):
+    report = dict(operation='int_inspect_merge', status='blocked',
+                  evidence_status='insufficient_evidence' if not args.confirm_reviewed else 'unverified',
+                  change_id=args.change_id, person_id=args.person_id, target_branch=args.target_branch,
+                  state_verified=False, blockers=[],
+                  validation='Build, tests and semantic review were not performed.',
+                  remote_state='Local tracking refs only; their remote freshness is unknown.')
+    try:
+        check_git_environment(directory)
+        root = repository_root(directory).resolve()
+        git_dir, _ = _git(root, 'rev-parse', '--absolute-git-dir')
+        common, _ = _git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        if Path(git_dir).resolve() != Path(common).resolve():
+            raise GitError('Linked worktrees are unsupported for INT inspection.')
+        before = inspect_merge_snapshot(root)
+        facts, snapshot = before
+        report['git_state'] = facts
+        try:
+            assess_pending_merge(root, load_config, args, report, facts, snapshot)
+        finally:
+            after = inspect_merge_snapshot(root)
+            if after != before:
+                raise GitError('Git state changed during inspection; retry after concurrent activity ends.')
+            report['state_verified'] = True
+    except (EventError, GitError, KeyError, OSError, StatusError, ValueError) as exc:
+        report['status'] = 'blocked'
+        if report['evidence_status'] == 'reviewed_evidence_matches':
+            report['evidence_status'] = 'unverified'
+            report.pop('reviewed_evidence', None)
+        report['blockers'].append(str(exc))
+    return report
