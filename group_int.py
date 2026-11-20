@@ -252,8 +252,18 @@ def observe_target(root, canonical, options):
 
 
 def fast_forward(directory, load_config, args):
-    report = dict(operation='int_ff_only', status='blocked', blockers=[], attempted=False,
+    return integrate(directory, load_config, args, prepare=False)
+
+
+def prepare_merge(directory, load_config, args):
+    return integrate(directory, load_config, args, prepare=True)
+
+
+def integrate(directory, load_config, args, *, prepare):
+    report = dict(operation='int_prepare_merge' if prepare else 'int_ff_only',
+                  status='blocked', blockers=[], attempted=False,
                   validation='Build, tests and semantic review were not performed.',
+                  concurrency='The INT lock does not exclude external Git or IDE writes.',
                   remote_state='Local tracking refs may be stale; remote state was not verified.')
     try:
         check_git_environment(directory)
@@ -268,7 +278,7 @@ def fast_forward(directory, load_config, args):
         except FileExistsError as exc:
             raise GitError('INT write lock exists; inspect it before retrying.') from exc
         try:
-            apply_fast_forward(root, load_config, args, report)
+            apply_integration(root, load_config, args, report, prepare=prepare)
         finally:
             lock.rmdir()
     except (EventError, GitError, OSError, StatusError, ValueError) as exc:
@@ -278,7 +288,7 @@ def fast_forward(directory, load_config, args):
     return report
 
 
-def apply_fast_forward(root, load_config, args, report):
+def apply_integration(root, load_config, args, report, *, prepare):
     before_refs = all_refs(root)
     if any(ref.startswith('refs/replace/') for ref in before_refs):
         raise GitError('Replace objects are unsupported for INT writes.')
@@ -320,6 +330,9 @@ def apply_fast_forward(root, load_config, args, report):
     if len(old) != len(head) or not re.fullmatch(r'[0-9a-f]+', old):
         raise GitError('Expected HEAD must be a full hexadecimal object ID.')
     tracking = checked['target_tracking_sha']
+    tracking_ref = TRACKING + args.target_branch
+    if tracking_ref in before_refs and not tracking:
+        raise GitError('Target tracking ref is symbolic or unavailable.')
     if tracking and not ancestor(root, tracking, head):
         raise GitError('Target is behind or diverges from its tracking ref; synchronize first.')
     upstream = checked['target_upstream_ref']
@@ -327,13 +340,30 @@ def apply_fast_forward(root, load_config, args, report):
         oid, _, symbolic = before_refs.get(upstream, '').partition('\t')
         if not oid or symbolic or not ancestor(root, oid, head):
             raise GitError('Configured upstream is symbolic, ahead or diverged; synchronize first.')
-    if head != old and not (head == work and ancestor(root, old, work)):
+    if head != old and not (not prepare and head == work and ancestor(root, old, work)):
         raise GitError('Expected target HEAD is stale.')
     incoming = incoming_commits(root, old, work)
     report['incoming_commits'] = incoming
     reviewed = [] if args.expected_incoming == 'none' else args.expected_incoming.lower().split(',')
     if sorted(reviewed) != incoming:
         raise GitError('Incoming commit range differs from the reviewed T..A list.')
+    if not evidence['work_is_ancestor_of_target']:
+        linear = ancestor(root, head, work)
+        if prepare:
+            if linear:
+                raise GitError('Target can fast-forward; use --ff-only.')
+            bases = evidence['target_work_merge_bases']
+            if len(bases) != 1:
+                raise GitError('Merge preparation requires exactly one available merge base.')
+            write_safety(root, bases[0])
+            # Non-FF Git merge can overwrite ignored files despite --no-overwrite-ignore.
+            ignored, _ = _git(root, 'ls-files', '--others', '--ignored', '--exclude-standard',
+                              '--directory', '-z')
+            if ignored:
+                raise GitError('Ignored untracked paths may be overwritten by Git; '
+                               'merge preparation requires a worktree without them.')
+        elif not linear:
+            raise GitError('Target and candidate diverge; non-fast-forward integration is required.')
     before, blockers = observe_target(root, canonical, options)
     report['before'] = before
     if blockers or (before['head_ref'], before['head']) != (target, head) or all_refs(root) != before_refs:
@@ -341,27 +371,51 @@ def apply_fast_forward(root, load_config, args, report):
     if evidence['work_is_ancestor_of_target']:
         report['status'] = 'already_in_history'
         return
-    if not ancestor(root, head, work):
-        raise GitError('Target and candidate diverge; non-fast-forward integration is required.')
-
+    mode = ('--no-ff', '--strategy=ort') if prepare else ('--ff-only',)
     report['attempted'] = True
     try:
         output, code = _git(root, *GIT, *options, '-c', 'core.hooksPath=' + os.devnull,
                             '-c', 'rerere.enabled=false', '-c', 'maintenance.auto=false',
                             '-c', 'gc.auto=0', '-c', 'submodule.recurse=false',
                             '-c', f'branch.{args.target_branch}.mergeOptions=',
-                            'merge', '--ff-only', '--no-commit', '--no-autostash',
-                            '--no-overwrite-ignore', '--no-edit', '--', work)
+                            'merge', *mode, '--no-commit', '--no-autostash',
+                            '--no-overwrite-ignore', '--no-edit', '--', work,
+                            allowed=(0, 1) if prepare else (0,), include_stderr=prepare)
         report.update(git_output=output, git_exit=code)
     except GitError as exc:
         report['blockers'].append(str(exc))
     finally:
         after, blockers = observe_target(root, canonical, options)
         report['after'] = after
-        expected_refs = dict(before_refs, **{target: work + '\t'})
         actual_refs = all_refs(root)
         report['changed_refs'] = sorted(ref for ref in before_refs.keys() | actual_refs.keys()
                                         if before_refs.get(ref) != actual_refs.get(ref))
+    if prepare:
+        verify_pending_merge(root, target, head, work, report)
+        return
+    expected_refs = dict(before_refs, **{target: work + '\t'})
     if blockers or (after['head_ref'], after['head']) != (target, work) or actual_refs != expected_refs:
         raise GitError('Fast-forward postconditions could not be verified; inspect the preserved Git state.')
     report['status'] = 'write_unverified' if report['blockers'] else 'local_fast_forward_verified'
+
+
+def verify_pending_merge(root, target, head, work, report):
+    after = report['after']
+    marker_path, _ = _git(root, 'rev-parse', '--git-path', 'MERGE_HEAD')
+    marker = root / marker_path
+    merge_heads = marker.read_bytes().splitlines() if marker.exists() else []
+    after['merge_heads'] = [oid.decode('ascii', errors='replace') for oid in merge_heads]
+    if (report['changed_refs'] or (after['head_ref'], after['head']) != (target, head)
+            or merge_heads != [work.encode('ascii')] or after['git_operations'] != ['MERGE_HEAD']
+            or after['index_lock_present'] or after['hidden_index_flags']
+            or after['submodule_worktrees_not_inspected']):
+        raise GitError('Pending merge postconditions could not be verified; inspect the preserved Git state.')
+    if report.get('git_exit') == 1 and after['unmerged_paths']:
+        report['status'] = 'conflicted'
+        report['blockers'].append('Git reported merge conflicts; inspect the preserved unmerged paths.')
+        return
+    if report.get('git_exit') != 0 or after['unmerged_paths'] or after['unstaged'] or after['untracked']:
+        raise GitError('Git did not leave a verified staged merge; inspect the preserved Git state.')
+    _git(root, *GIT, 'diff', '--cached', '--no-ext-diff', '--no-textconv', head, '--')
+    report['review_command'] = 'git diff --cached --no-ext-diff --no-textconv'
+    report['status'] = 'pending_commit'

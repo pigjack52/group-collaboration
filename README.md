@@ -1,5 +1,34 @@
 # Group Collaboration System
 
+## 步驟 3-9C-3：INT 準備非 Fast-forward Merge
+
+先用 `int --preflight` 查證候選，再依下方 Fast-forward 範例核對相同的審閱資料。
+目標 T 與候選 A 必須分歧且只有一個可驗證的共同祖先。
+
+```powershell
+python -B groupctl.py int --prepare-merge --person-id student01 --change-id C-17 `
+  --target-branch people/student01/my-topic --expected-head $targetSha --work-sha $workSha `
+  --expected-event-id $eventId --expected-event-blob $eventBlobSha `
+  --expected-source-ref $sourceRef --expected-source-tip $sourceTipSha `
+  --expected-incoming ($reviewedCommits -join ',') --confirm-reviewed
+```
+
+三個 INT 模式互斥。若 T 是 A 的祖先，使用 `--ff-only`。若 A 已在 T 的歷史中，
+回傳 `already_in_history`，退出碼為 0。Git 的非 Fast-forward Merge 可能覆寫 ignored
+檔案，因此準備前也會拒絕 ignored 的未追蹤路徑，包括工作目錄裡的 `.group/local/` 資料。
+INT 互斥鎖只協調本工具，執行期間須暫停外部 Git 與 IDE 寫入。
+
+| 狀態 | 現場 | 退出碼 |
+| --- | --- | --- |
+| `pending_commit` | HEAD 與所有 refs 維持原值，MERGE_HEAD 指向 A，index 保留待審閱結果 | 0 |
+| `conflicted` | 保留 MERGE_HEAD、index stages、工作樹和 Git 診斷，輸出列出未合併路徑 | 1 |
+| `blocked` | 寫入前的安全檢查未通過 | 1 |
+| `write_unverified` | 已嘗試 Git 寫入，現場保留供查驗 | 1 |
+
+用 `git status` 和 `git diff --cached --no-ext-diff --no-textconv` 審閱待提交結果。
+Merge Commit 由操作者另行決定。準備模式僅驗證本機 Git 狀態，建置、測試、
+語意審查及整合事件發布屬於後續步驟。
+
 ## 步驟 3-9C-2：INT 本機 Fast-forward
 
 先執行下方 `int --preflight`，核對事件、實際 diff、介面與

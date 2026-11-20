@@ -1,4 +1,4 @@
-"""INT preflight tests using temporary Git repositories and the real CLI."""
+"""INT tests using temporary Git repositories and the real CLI."""
 import json
 import subprocess
 import sys
@@ -228,14 +228,15 @@ class IntPreflightTests(unittest.TestCase):
                                 cwd=self.root, env=self.env, capture_output=True,
                                 text=True, encoding='utf-8', timeout=45)
         self.assertEqual(result.returncode, int(status not in (
-            'local_fast_forward_verified', 'already_in_history')), result.stdout + result.stderr)
+            'local_fast_forward_verified', 'already_in_history', 'pending_commit')),
+            result.stdout + result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report['status'], status, report)
         if blocker:
             self.assertIn(blocker, ' '.join(report['blockers']))
         if status == 'local_fast_forward_verified':
             refs['refs/heads/' + TARGET] = self.work + '\t'
-        elif status != 'write_unverified':
+        elif not report['attempted']:
             self.assertEqual(self.snapshot(), before)
         self.assertEqual(group_int.all_refs(self.root), refs)
         return report
@@ -384,3 +385,162 @@ class IntPreflightTests(unittest.TestCase):
                                              Namespace(confirm_unproposed=True, **values))
         self.assertEqual(report['status'], 'local_fast_forward_verified', report)
         self.assertFalse((self.root / '.git/groupctl-int.lock').exists())
+
+    def prepare_args(self, **overrides):
+        args = self.ff_args(**overrides)
+        args[1] = '--prepare-merge'
+        return args
+
+    def diverge(self, conflict=False):
+        path = self.file if conflict else self.root / 'local.txt'
+        path.write_bytes(b'local change\n')
+        return self.commit('diverge on target')
+
+    def test_prepare_leaves_reviewable_index_and_blocks_replay(self):
+        head = self.diverge()
+        before_log = self.git('reflog', '--format=%H')
+        args = self.prepare_args(expected_head=head)
+        # Explicit command-line behavior overrides local preferences.
+        self.git('config', 'merge.ff', 'only')
+        self.git('config', f'branch.{TARGET}.mergeOptions', '--squash')
+        report = self.ff(args, 'pending_commit')
+        self.assertEqual(report['after']['head'], head)
+        self.assertEqual(report['after']['merge_heads'], [self.work])
+        self.assertEqual(report['after']['unmerged_paths'], [])
+        self.assertEqual(report['changed_refs'], [])
+        self.assertEqual(self.git('rev-parse', 'HEAD', 'refs/heads/' + TARGET, 'MERGE_HEAD'),
+                         '\n'.join((head, head, self.work)))
+        self.assertEqual(self.git('reflog', '--format=%H'), before_log)
+        self.assertEqual(self.git('ls-files', '-u'), '')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'second.txt\ntracked.txt')
+        self.assertIn('+published first change', self.git('diff', '--cached', '--', 'tracked.txt'))
+        self.assertEqual(self.git('show', ':local.txt'), 'local change')
+        self.assertFalse(self.event_dir.exists())
+        self.ff(args, 'blocked', 'Unfinished Git operation')
+
+    def test_prepare_reports_conflict_and_preserves_index_stages(self):
+        head = self.diverge(conflict=True)
+        self.git('config', 'rerere.enabled', 'true')
+        report = self.ff(self.prepare_args(expected_head=head), 'conflicted')
+        self.assertEqual(report['git_exit'], 1)
+        self.assertIn('CONFLICT', report['git_output'])
+        self.assertEqual(report['after']['unmerged_paths'], ['tracked.txt'])
+        self.assertEqual(self.git('rev-parse', 'HEAD', 'MERGE_HEAD'), head + '\n' + self.work)
+        for stage, commit in ((1, self.base), (2, head), (3, self.work)):
+            self.assertEqual(self.git('show', f':{stage}:tracked.txt'),
+                             self.git('show', commit + ':tracked.txt'))
+        self.assertIn(b'<<<<<<<', self.file.read_bytes())
+        self.assertFalse((self.root / '.git/rr-cache').exists())
+
+    def test_prepare_blocks_ignored_collision(self):
+        head = self.diverge()
+        (self.root / '.git/info/exclude').write_text('second.txt\n', encoding='utf-8')
+        path = self.root / 'second.txt'
+        path.write_bytes(b'local ignored content\n')
+        self.ff(self.prepare_args(expected_head=head), 'blocked', 'Ignored untracked paths')
+        self.assertEqual(path.read_bytes(), b'local ignored content\n')
+
+    def test_prepare_git_failure_preserves_repository_state(self):
+        head = self.diverge()
+        self.git('config', 'merge.verifySignatures', 'true')
+        report = self.ff(self.prepare_args(expected_head=head), 'write_unverified', 'signature')
+        self.assertTrue(report['attempted'])
+        self.assertEqual(report['after']['head'], head)
+        self.assertEqual(report['after']['merge_heads'], [])
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_prepare_refuses_linear_and_reports_already_in_history(self):
+        args = self.prepare_args()
+        self.ff(args, 'blocked', '--ff-only')
+        self.git('merge', '--ff-only', self.work)
+        self.ff(args, 'blocked', 'stale')
+        self.ff(self.prepare_args(expected_head=self.work, expected_incoming='none'),
+                'already_in_history')
+
+    def test_prepare_refuses_unrelated_history(self):
+        tree = self.git('rev-parse', self.base + '^{tree}')
+        orphan = self.git('commit-tree', tree, '-m', 'unrelated')
+        self.git('update-ref', 'refs/heads/' + TARGET, orphan)
+        self.ff(self.prepare_args(expected_head=orphan), 'blocked', 'common ancestor')
+
+    def test_prepare_refuses_multiple_merge_bases(self):
+        other = self.diverge()
+        tree = self.git('rev-parse', other + '^{tree}')
+        head = self.git('commit-tree', tree, '-p', other, '-p', self.work, '-m', 'target merge')
+        self.git('update-ref', 'refs/heads/' + TARGET, head)
+        self.git('switch', SOURCE)
+        self.work = self.git('commit-tree', tree, '-p', self.work, '-p', other,
+                             '-m', 'candidate merge')
+        self.git('reset', '--hard', self.work)
+        self.event_dir.mkdir(exist_ok=True)
+        self.tip = self.record(dict(self.event, commit=self.work))
+        self.git('update-ref', SOURCE_REF, self.tip)
+        self.git('switch', TARGET)
+        report = self.ff(self.prepare_args(expected_head=head, expected_incoming=self.work),
+                         'blocked', 'exactly one')
+        self.assertEqual(len(report['preflight']['ancestry_evidence']['target_work_merge_bases']), 2)
+
+    def test_prepare_rechecks_review_and_target_tracking(self):
+        head = self.diverge()
+        for overrides, reason in (
+            (dict(expected_head=self.base), 'stale'),
+            (dict(expected_source_tip=self.work), 'source_tip_sha'),
+            (dict(expected_event_blob=self.work), 'event_blob_sha'),
+            (dict(expected_incoming='none'), 'commit range'),
+        ):
+            with self.subTest(reason=reason):
+                self.ff(self.prepare_args(**(dict(expected_head=head) | overrides)),
+                        'blocked', reason)
+        self.git('update-ref', 'refs/remotes/origin/' + TARGET, self.work)
+        self.ff(self.prepare_args(expected_head=head), 'blocked', 'synchronize')
+
+    def test_prepare_refuses_dirty_state_and_markers(self):
+        head = self.diverge()
+        args = self.prepare_args(expected_head=head)
+        self.file.write_bytes(b'unsaved\n')
+        self.ff(args, 'blocked', 'dirty')
+        self.git('restore', '--', 'tracked.txt')
+        extra = self.root / 'extra.txt'
+        extra.touch()
+        self.ff(args, 'blocked', 'dirty')
+        self.git('add', 'extra.txt')
+        self.ff(args, 'blocked', 'dirty')
+        self.git('rm', '-f', 'extra.txt')
+        for name, reason in (('index.lock', 'index lock'), ('CHERRY_PICK_HEAD', 'Unfinished')):
+            with self.subTest(marker=name):
+                marker = self.root / '.git' / name
+                marker.write_text(head + '\n', encoding='ascii')
+                self.ff(args, 'blocked', reason)
+                marker.unlink()
+
+    def test_prepare_refuses_protected_and_other_owner_targets(self):
+        self.ff(self.prepare_args(person_id='P02'), 'blocked', 'operator-owned')
+        self.git('switch', 'main')
+        self.ff(self.prepare_args(target_branch='main'), 'blocked', 'canonical and main')
+        config = self.root / '.group/group.json'
+        data = json.loads(config.read_text(encoding='utf-8'))
+        data['canonical_branch'] = TARGET
+        config.write_text(json.dumps(data), encoding='utf-8')
+        self.commit('configure different canonical branch')
+        self.ff(self.prepare_args(target_branch='main'), 'blocked', 'operator-owned')
+        self.git('switch', TARGET)
+        config.write_text(json.dumps(data), encoding='utf-8')
+        self.commit('configure personal canonical branch')
+        self.ff(self.prepare_args(), 'blocked', 'canonical and main')
+
+    def test_prepare_cli_requires_review_and_exclusive_mode(self):
+        args = self.prepare_args()
+        for invalid in ([*args, '--preflight'], [*args, '--ff-only'],
+                        [arg for arg in args if arg != '--confirm-reviewed'], args[:-2]):
+            with self.subTest(args=invalid):
+                result = subprocess.run([sys.executable, '-B', str(test_pub.CLI), *invalid],
+                                        cwd=self.root, env=self.env, capture_output=True, timeout=45)
+                self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_prepare_requires_unproposed_confirmation(self):
+        self.replace_publication(proposed_for_integration=False)
+        head = self.diverge()
+        args = self.prepare_args(expected_head=head)
+        args.remove('--confirm-unproposed')
+        self.ff(args, 'blocked', '--confirm-unproposed')
+        self.ff([*args, '--confirm-unproposed'], 'pending_commit')

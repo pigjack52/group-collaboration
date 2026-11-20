@@ -9,7 +9,7 @@ from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
-from group_int import fast_forward, preflight as int_preflight
+from group_int import fast_forward, prepare_merge, preflight as int_preflight
 from group_test import run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
@@ -78,6 +78,7 @@ def main(argv=None):
     modes = integration.add_mutually_exclusive_group(required=True)
     modes.add_argument('--preflight', action='store_true')
     modes.add_argument('--ff-only', action='store_true')
+    modes.add_argument('--prepare-merge', action='store_true')
     integration.add_argument('--person-id', required=True)
     integration.add_argument('--change-id', required=True)
     integration.add_argument('--target-branch', required=True, help='Exact local target branch name')
@@ -118,11 +119,12 @@ def main(argv=None):
         reviewed = (args.expected_head, args.work_sha, args.expected_event_id,
                     args.expected_event_blob, args.expected_source_ref,
                     args.expected_source_tip, args.expected_incoming)
-        if args.ff_only and not (all(reviewed) and args.confirm_reviewed):
-            integration.error('--ff-only requires all reviewed evidence options and --confirm-reviewed')
+        if (args.ff_only or args.prepare_merge) and not (all(reviewed) and args.confirm_reviewed):
+            mode = '--ff-only' if args.ff_only else '--prepare-merge'
+            integration.error(f'{mode} requires all reviewed evidence options and --confirm-reviewed')
         if args.preflight and (any(value is not None for value in reviewed)
                                or args.confirm_reviewed or args.confirm_unproposed):
-            integration.error('Reviewed evidence options require --ff-only')
+            integration.error('Reviewed evidence options require --ff-only or --prepare-merge')
     if args.command == 'pub':
         push_options = (args.remote, args.expected_url, args.expected_remote_head)
         event_options = (args.work_sha, args.change_id, args.review_file)
@@ -175,6 +177,8 @@ def main(argv=None):
         if args.command == 'int':
             if args.ff_only:
                 report = fast_forward(Path.cwd(), load_config, args)
+            elif args.prepare_merge:
+                report = prepare_merge(Path.cwd(), load_config, args)
             else:
                 report = int_preflight(Path.cwd(), load_config, args.person_id,
                                        args.change_id, args.target_branch)

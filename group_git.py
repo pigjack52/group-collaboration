@@ -10,7 +10,8 @@ class GitError(Exception):
     """Git state is unavailable or a Git command failed."""
 
 
-def _git(root, *args, allowed=(0,), env_overrides=None, input_bytes=None, raw=False):
+def _git(root, *args, allowed=(0,), env_overrides=None, input_bytes=None, raw=False,
+         include_stderr=False):
     env = os.environ.copy()
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
     env.update(env_overrides or {})
@@ -26,7 +27,10 @@ def _git(root, *args, allowed=(0,), env_overrides=None, input_bytes=None, raw=Fa
         raise GitError(f"git {' '.join(args)} failed ({result.returncode}): {detail}")
     if raw:
         return result.stdout, result.returncode
-    return result.stdout.decode("utf-8", errors="surrogateescape").rstrip("\n"), result.returncode
+    output = result.stdout.decode("utf-8", errors="surrogateescape")
+    if include_stderr:
+        output += result.stderr.decode("utf-8", errors="surrogateescape")
+    return output.rstrip("\n"), result.returncode
 
 
 @dataclass(frozen=True)
