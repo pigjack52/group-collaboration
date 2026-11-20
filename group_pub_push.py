@@ -97,14 +97,16 @@ def check_target(root, load_config, args, *, own_lock=False):
     if shallow == 'true':
         raise GitError('A shallow repository requires a separate PUB workflow.')
     check_destination(root, args)
+    return facts
 
 
 def check_local(root, load_config, args):
-    check_target(root, load_config, args)
+    facts = check_target(root, load_config, args)
     hooks, _ = _git(root, 'rev-parse', '--git-path', 'hooks')
     pre_push = root / hooks / 'pre-push'
     if pre_push.is_file() and os.access(pre_push, os.X_OK):
         raise GitError('An active pre-push hook requires a separate push workflow.')
+    return facts
 
 
 def send_update(root, args, ref, old, report):

@@ -1,5 +1,46 @@
 # Group Collaboration System
 
+## 步驟 3-8D-2：PUB 事件 Push 與遠端驗證
+
+先以 `--push-work` 推送工作 Commit A，再用 `--event-commit` 建立本機事件 Commit E。
+檢閱 E 的事件 JSON、A 與 E 的完整 SHA，以及目標個人分支和遠端 URL 後，使用
+`--confirm-reviewed` 授權推送。第一次執行時，`--expected-remote-head` 填 A。
+
+```powershell
+python -B groupctl.py pub --push-event --person-id student01 --expected-branch people/student01/my-topic --work-sha $workSha --expected-head $eventSha --change-id $changeId --remote origin --expected-url $reviewedUrl --expected-remote-head $workSha --confirm-reviewed
+```
+
+工具重新核對本機 HEAD、群組與成員資料、分支歸屬、遠端 URL 和 Git 操作狀態。
+E 必須以 A 為唯一父 Commit，tree 只能新增一個符合事件 schema 與指定參數的
+`change_published` JSON。工具以暫存 Git repository 讀取遠端可見分支 tip 上的事件，
+檢查事件 ID、change ID 和分支與工作 SHA 的組合是否重複。目標分支須仍指向 A，
+才會嘗試以一般 fast-forward Push 將單一 ref 從 A 更新為 E。
+
+Push 前使用即時查詢，傳送時以 pre-push guard 確認伺服器公告的舊 SHA 和目標 ref，
+伺服器更新 ref 時再比對舊 SHA。Push 後工具以 `git ls-remote` 查詢指定分支，並在另一個
+全新的暫存 bare repository fetch 該分支。驗證會讀取遠端傳回的 E，確認父 Commit、tree
+差異、事件路徑、blob SHA 和 JSON 位元組皆符合本機已檢閱的 E，最後再查一次分支 tip。
+驗證結果只反映觀察期間的狀態。分支之後仍可能移動，同一 SHA 中途被移走再改回也可能
+無法察覺。重複檢查的範圍是該端點對目前憑證公開的分支 tip，不涵蓋隱藏或已刪除的 ref、
+僅存於歷史或 tag 的事件、其他遠端，或掃描後在另一分支同時發布的事件。
+
+遇到中斷或未能完成驗證，可用同一份 A、E 和 change ID 重試。若已確認遠端 tip 是 E，
+`--expected-remote-head` 也可填 E。遠端已有 E 時，工具會重新查詢並 fetch 驗證，無須再 Push。
+遠端 tip 若是其他 SHA，請先檢查實際分支狀態。此操作的發布範圍是指定個人分支上的事件。
+整合至 main、REV 和 FINAL 各有自己的流程與證據。
+
+| `result` | 意義 | 退出碼 |
+| --- | --- | --- |
+| `not_executed` | 前置檢查未通過，未執行 Push | 1 |
+| `push_rejected` | Git 或傳送防護拒絕更新 | 1 |
+| `verification_failed` | 遠端可能已有 E，查詢、fetch 或內容驗證未完成 | 1 |
+| `already_published` | 遠端已有 E，且獨立驗證成功 | 0 |
+| `published_verified` | Push 成功，且獨立驗證 E 與事件成功 | 0 |
+| `partial` | Push 結果未能確認，後續查詢當時也未觀察到 E | 1 |
+
+參數錯誤的退出碼為 2。JSON 結果會記錄 `event_id`、事件路徑與 blob SHA（若已讀取）、
+已觀察的遠端 tip，以及 Git Push 退出碼（若可取得）。
+
 ## 步驟 3-8D-1：PUB 本機事件 Commit
 
 工作 Commit A 經 3-8C-2 推送並驗證後，審閱 A 相對其唯一父 Commit 的 diff 與實際
@@ -39,12 +80,12 @@ python -B groupctl.py pub --event-commit --person-id student01 --expected-branch
 | `partial` | 事件已寫入，後續 Commit 或驗證未完整完成。依 `phase` 核查 ref 和 index | 1 |
 | `local_event_committed` | E 已在本機建立並驗證，事件尚未發布 | 0 |
 
-參數錯誤的退出碼為 2。遠端驗證只反映查詢當時的 A。事件須在後續步驟推送且可由
+參數錯誤的退出碼為 2。遠端驗證只反映查詢當時的 A。事件須以 `--push-event` 推送且可由
 共享遠端查得後才算發布。重試會透過工作樹及已知本機分支與遠端追蹤 ref 的 tip
 檢查重複 change ID，以及同分支同工作 SHA 的既有事件。不同機器間的唯一性依靠
 唯一 ID 分配及後續共享遠端檢查。若中斷，依回報內的路徑、候選 SHA、HEAD 和 index
 確認完成到哪一階段。若留下事件檔或 E，保留原始紀錄並停止重試。本機恢復及事件
-推送由後續步驟處理。
+推送由 `--push-event` 處理。
 
 ## 步驟 3-8C-2：PUB 工作 Commit Push
 
@@ -87,7 +128,7 @@ Git 再以該舊 SHA 比對 ref。Push 返回成功後，工具另執行一次 `
 以 SHA 比對也無法察覺 ref 在兩次觀察之間變更後又回到同一 SHA。請使用信任的 Git
 伺服器與認證設定，並讓目標分支使用一般直接 ref。工具會拒絕查詢中顯示的符號 ref，
 Git 協定所能揭露的 ref 資訊取決於伺服器。此步驟的範圍是工作 Commit，
-`change_published` 事件須在後續步驟處理。
+`change_published` 事件由 `--event-commit` 和 `--push-event` 處理。
 
 ## 步驟 3-8C-1：PUB 工作 Commit
 
