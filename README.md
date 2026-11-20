@@ -1,5 +1,51 @@
 # Group Collaboration System
 
+## 步驟 3-8D-1：PUB 本機事件 Commit
+
+工作 Commit A 經 3-8C-2 推送並驗證後，審閱 A 相對其唯一父 Commit 的 diff 與實際
+測試證據。準備 UTF-8 JSON 檔，提供以下六個欄位。以下是只改動單一文字檔的測試
+情境。請依實際審閱填寫各欄位，並在 `tests_run` 記錄確實執行的檢查。
+
+```json
+{
+  "summary": "Update the tracked fixture text.",
+  "files_changed": ["tracked.txt"],
+  "interface_changes": [],
+  "tests_run": [],
+  "known_issues": [],
+  "proposed_for_integration": false
+}
+```
+
+```powershell
+python -B groupctl.py pub --event-commit --person-id student01 --expected-branch people/student01/my-topic --work-sha $workSha --expected-head $workSha --remote origin --expected-url https://github.com/pigjack52/group-collaboration.git --change-id $changeId --review-file $reviewFile --confirm-reviewed
+```
+
+`$workSha` 是 A 的完整 SHA，`$changeId` 是為這項工作取用且保留供重試的唯一識別碼
+（例如以 `C-` 加 UUID 產生），`$reviewFile` 是已審閱的 JSON 路徑。操作者以
+`--confirm-reviewed` 確認審閱內容、身分及目的地，並授權寫入本機事件和 Commit。
+工具會核對 `files_changed` 與 A 的 Git diff，其他工程陳述由審閱者確認。
+
+本機個人分支 HEAD 與指定遠端的即時分支 tip 都須等於 A。暫存區須無變更，未選取的
+未暫存修改及未追蹤檔案可保留。工具以排他方式建立 `.group/events/<event_id>.json`，
+並以隔離 index 驗證候選 tree 僅新增該事件檔。更新前後會檢查目前分支，且 Git
+僅在指定個人分支的舊 tip 仍為 A 時更新它。執行期間請避免同時切換分支或編輯
+事件目錄。事件的 `commit` 欄位指向 A，事件 Commit E 的唯一父 Commit 也是 A。
+
+| `result` | 意義 | 退出碼 |
+| --- | --- | --- |
+| `event_validation_failed` | 前置驗證失敗，未寫入事件 | 1 |
+| `event_creation_failed` | 寫入事件失敗，請依事件路徑與診斷核查磁碟狀態 | 1 |
+| `partial` | 事件已寫入，後續 Commit 或驗證未完整完成。依 `phase` 核查 ref 和 index | 1 |
+| `local_event_committed` | E 已在本機建立並驗證，事件尚未發布 | 0 |
+
+參數錯誤的退出碼為 2。遠端驗證只反映查詢當時的 A。事件須在後續步驟推送且可由
+共享遠端查得後才算發布。重試會透過工作樹及已知本機分支與遠端追蹤 ref 的 tip
+檢查重複 change ID，以及同分支同工作 SHA 的既有事件。不同機器間的唯一性依靠
+唯一 ID 分配及後續共享遠端檢查。若中斷，依回報內的路徑、候選 SHA、HEAD 和 index
+確認完成到哪一階段。若留下事件檔或 E，保留原始紀錄並停止重試。本機恢復及事件
+推送由後續步驟處理。
+
 ## 步驟 3-8C-2：PUB 工作 Commit Push
 
 先審閱要公開的 Commit 範圍、個人分支和遠端 URL。以

@@ -13,6 +13,7 @@ from group_test import run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
 from group_pub_push import push_work
+from group_pub_event import event_commit
 
 REQUIRED_FIELDS = (
     "protocol_version", "group_id", "canonical_branch", "assignment_file",
@@ -73,12 +74,13 @@ def main(argv=None):
     modes.add_argument('--update', action='store_true')
     test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
-    pub = commands.add_parser('pub', help='Publication preflight, work commit or verified work push')
+    pub = commands.add_parser('pub', help='Publication preflight, work commit, work push or local event commit')
     modes = pub.add_mutually_exclusive_group(required=True)
     modes.add_argument('--preflight', action='store_true')
     modes.add_argument('--work-commit', action='store_true')
     modes.add_argument('--use-existing', action='store_true')
     modes.add_argument('--push-work', action='store_true')
+    modes.add_argument('--event-commit', action='store_true')
     pub.add_argument('--person-id', required=True, help='Explicit configured member person_id')
     pub.add_argument('--expected-head', help='Full reviewed HEAD object ID')
     pub.add_argument('--expected-branch', help='Reviewed personal branch name')
@@ -87,20 +89,31 @@ def main(argv=None):
     pub.add_argument('--remote', help='Explicit configured remote name')
     pub.add_argument('--expected-url', help='Reviewed remote fetch and push URL')
     pub.add_argument('--expected-remote-head', help='Reviewed remote tip object ID, or absent')
+    pub.add_argument('--work-sha', help='Full SHA of the published work commit')
+    pub.add_argument('--change-id', help='Unique reviewed change ID')
+    pub.add_argument('--review-file', type=Path, help='JSON file containing reviewed event details')
     pub.add_argument('--confirm-reviewed', action='store_true',
                      help='Confirm human authorization and review of the actual contribution')
     args = parser.parse_args(argv)
     if args.command == 'pub':
         push_options = (args.remote, args.expected_url, args.expected_remote_head)
+        event_options = (args.work_sha, args.change_id, args.review_file)
+        if args.event_commit:
+            if not all(event_options) or not all(push_options[:2]):
+                pub.error('--event-commit requires --work-sha, --change-id, --review-file, --remote and --expected-url')
+            if any(value is not None for value in (args.file, args.message, args.expected_remote_head)):
+                pub.error('--event-commit does not accept --file, --message or --expected-remote-head')
+        elif any(value is not None for value in event_options):
+            pub.error('event options require --event-commit')
         if args.push_work and (not all(push_options) or args.file is not None or args.message is not None):
             pub.error('--push-work requires --remote, --expected-url and --expected-remote-head without --file or --message')
-        if not args.push_work and any(value is not None for value in push_options):
-            pub.error('remote options require --push-work')
+        if not (args.push_work or args.event_commit) and any(value is not None for value in push_options):
+            pub.error('remote options require --push-work or --event-commit')
         commit_options = (args.expected_head, args.expected_branch, args.file, args.message)
         if args.preflight and (any(value is not None for value in commit_options) or args.confirm_reviewed):
             pub.error('work commit options cannot be used with --preflight')
         if not args.preflight and not (args.expected_head and args.expected_branch and args.confirm_reviewed):
-            pub.error('PUB work modes require --expected-head, --expected-branch and --confirm-reviewed')
+            pub.error('PUB write modes require --expected-head, --expected-branch and --confirm-reviewed')
         if args.work_commit and not (args.file and args.message and args.message.strip()):
             pub.error('--work-commit requires --file and a nonblank --message')
         if args.use_existing and (args.file is not None or args.message is not None):
@@ -109,6 +122,10 @@ def main(argv=None):
     path = Path.cwd() / ".group" / "group.json"
     try:
         if args.command == 'pub':
+            if args.event_commit:
+                report = event_commit(Path.cwd(), load_config, args)
+                print(json.dumps(report, indent=2, ensure_ascii=True))
+                return int(report['result'] != 'local_event_committed')
             if args.push_work:
                 report = push_work(Path.cwd(), load_config, args)
                 print(json.dumps(report, indent=2, ensure_ascii=True))

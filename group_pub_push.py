@@ -78,10 +78,10 @@ def remote_head(root, url, ref, width):
     return oid
 
 
-def check_local(root, load_config, args):
-    facts = check_state(root, load_config, args)
+def check_target(root, load_config, args, *, own_lock=False):
+    facts = check_state(root, load_config, args, own_lock=own_lock)
     if args.expected_branch.casefold() in ('main', facts['canonical_branch'].casefold()):
-        raise GitError('Canonical branch push is prohibited.')
+        raise GitError('Canonical branch is prohibited for this PUB operation.')
     committed, _ = _git(root, '--no-replace-objects', 'cat-file', 'blob',
                         f'{facts["head"]}:.group/group.json')
     config = json.loads(committed.removeprefix('\ufeff'))
@@ -92,15 +92,19 @@ def check_local(root, load_config, args):
         raise GitError('Reviewed HEAD must identify a commit object.')
     grafts, _ = _git(root, 'rev-parse', '--git-path', 'info/grafts')
     if 'GIT_GRAFT_FILE' in os.environ or (root / grafts).exists():
-        raise GitError('Git history grafts are unsupported for PUB push.')
+        raise GitError('Git history grafts are unsupported for this PUB operation.')
     shallow, _ = _git(root, 'rev-parse', '--is-shallow-repository')
     if shallow == 'true':
-        raise GitError('A shallow repository requires a separate push workflow.')
+        raise GitError('A shallow repository requires a separate PUB workflow.')
+    check_destination(root, args)
+
+
+def check_local(root, load_config, args):
+    check_target(root, load_config, args)
     hooks, _ = _git(root, 'rev-parse', '--git-path', 'hooks')
     pre_push = root / hooks / 'pre-push'
     if pre_push.is_file() and os.access(pre_push, os.X_OK):
         raise GitError('An active pre-push hook requires a separate push workflow.')
-    check_destination(root, args)
 
 
 def send_update(root, args, ref, old, report):

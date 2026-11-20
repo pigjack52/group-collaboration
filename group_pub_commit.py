@@ -79,14 +79,14 @@ def commit_details(root, commit):
     return tree, parents
 
 
-def write_commit(root, load_config, args, report):
+def write_commit(root, load_config, args, report, *, prepare_event=None):
     head, branch = args.expected_head, args.expected_branch
     selected = set(args.file)
     if len(selected) != len(args.file):
         raise GitError('Specify each file once.')
     facts = check_state(root, load_config, args)
     check_write_settings(root, facts)
-    working = selection(root, head, selected)
+    working = selection(root, head, selected) if prepare_event is None else selected
     if selected.intersection(facts['submodule_worktrees_not_inspected']):
         raise GitError('Submodule changes require a separate commit workflow.')
     location, _ = _git(root, 'rev-parse', '--git-path', 'index')
@@ -103,6 +103,7 @@ def write_commit(root, load_config, args, report):
         with lock.open('xb') as locked_index:
             try:
                 check_write_settings(root, check_state(root, load_config, args, own_lock=True))
+                expected_blob = prepare_event() if prepare_event is not None else None
                 if selection(root, head, selected) != working:
                     raise GitError('Staging or working-tree selection changed during validation.')
                 if index.exists():
@@ -119,6 +120,11 @@ def write_commit(root, load_config, args, report):
                 if actual != selected:
                     raise GitError('Candidate tree differs from the exact selected file set: '
                                    + repr(sorted(actual)))
+                if expected_blob is not None:
+                    entry, _ = _git(root, *options, '--literal-pathspecs', 'ls-tree',
+                                    '-r', '-z', tree, '--', args.file[0])
+                    if paths(entry) != {f'100644 blob {expected_blob}\t{args.file[0]}'}:
+                        raise GitError('Candidate tree does not contain the exact regular event blob.')
                 entries, _ = _git(root, *options, 'ls-tree', '-r', '-z', tree)
                 if any(entry.startswith('160000 ') and entry.split('\t', 1)[1] in selected
                        for entry in paths(entries)):
@@ -144,8 +150,14 @@ def write_commit(root, load_config, args, report):
                     raise GitError('Selected working-tree content changed before the ref update.')
                 ref = 'refs/heads/' + branch
                 report['phase'] = 'updating_ref'
-                _git(root, *options, 'update-ref', '--no-deref', '-m', 'groupctl PUB work commit',
-                     ref, commit, head)
+                message = 'groupctl PUB work commit'
+                if prepare_event is not None:
+                    message = 'groupctl PUB event commit'
+                    report['tree'] = tree
+                    current_ref, _ = _git(root, 'symbolic-ref', '--quiet', 'HEAD')
+                    if current_ref != ref:
+                        raise GitError('Current branch changed before the event ref update.')
+                _git(root, *options, 'update-ref', '--no-deref', '-m', message, ref, commit, head)
                 report.update(phase='ref_updated', commit=commit, parents=[head], files=sorted(actual))
                 current_ref, _ = _git(root, 'symbolic-ref', '--quiet', 'HEAD')
                 current_head, _ = _git(root, 'rev-parse', '--verify', 'HEAD^{commit}')
