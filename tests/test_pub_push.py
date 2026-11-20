@@ -12,6 +12,7 @@ import group_pub_push
 from group_git import GitError
 from groupctl import load_config
 import test_pub
+from test_events import sample
 
 
 REF = 'refs/heads/' + test_pub.BRANCH
@@ -94,6 +95,61 @@ class PushTests(unittest.TestCase):
         self.remote_git('update-ref', '-d', REF)
         self.run_push('verified', expected_remote_head='absent')
         self.assert_tip(self.head)
+
+    def add_event(self, kind):
+        path = self.root / '.group/events/E-fixture.json'
+        path.parent.mkdir()
+        event = dict(sample(kind), event_id='E-fixture', group_id='G-test')
+        if kind == 'change_published':
+            event.update(branch=test_pub.BRANCH, commit=self.head, change_id='C-fixture',
+                         files_changed=['tracked.txt'])
+        path.write_text(json.dumps(event), encoding='utf-8')
+        return path, self.commit('event fixture')
+
+    def test_event_commit_cannot_be_pushed_as_work(self):
+        _, event = self.add_event('change_published')
+        report = self.run_push('not_executed', expected_head=event)
+        self.assertIn('dedicated event publication', report['error'])
+        self.assertNotIn('push_exit', report)
+        self.assert_tip(self.base)
+
+    def test_intermediate_event_even_if_removed_cannot_be_pushed_as_work(self):
+        path, _ = self.add_event('finding')
+        path.unlink()
+        tip = self.commit('remove event from final tree')
+        report = self.run_push('not_executed', expected_head=tip)
+        self.assertIn('dedicated event publication', report['error'])
+        self.assert_tip(self.base)
+
+    def test_followup_work_can_inherit_a_published_event(self):
+        _, event = self.add_event('change_published')
+        self.git('push', self.url, f'{event}:{REF}')
+        self.file.write_text('followup work\n', encoding='utf-8')
+        tip = self.commit('followup work')
+        self.run_push('verified', expected_head=tip, expected_remote_head=event)
+        self.assert_tip(tip)
+
+    def test_new_branch_can_inherit_an_already_published_event(self):
+        _, event = self.add_event('change_published')
+        self.git('push', self.url, f'{event}:refs/heads/people/P01/earlier')
+        self.remote_git('update-ref', '-d', REF)
+        self.file.write_text('followup work\n', encoding='utf-8')
+        tip = self.commit('followup work on new branch')
+        self.run_push('verified', expected_head=tip, expected_remote_head='absent')
+        self.assert_tip(tip)
+
+    def test_merged_side_history_must_already_be_published(self):
+        self.git('switch', '-c', 'people/P01/side')
+        _, event = self.add_event('finding')
+        self.git('switch', test_pub.BRANCH)
+        self.git('merge', '--no-ff', '-m', 'merge side history', event)
+        tip = self.git('rev-parse', 'HEAD')
+        report = self.run_push('not_executed', expected_head=tip)
+        self.assertIn('dedicated event publication', report['error'])
+        self.assert_tip(self.base)
+        self.git('push', self.url, f'{event}:refs/heads/people/P01/side')
+        self.run_push('verified', expected_head=tip)
+        self.assert_tip(tip)
 
     def test_wrong_identity_branch_or_sha_never_contacts_remote(self):
         with patch.object(group_pub_push, 'remote_head') as query:

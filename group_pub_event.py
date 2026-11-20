@@ -79,6 +79,15 @@ def check_index(root, head):
         raise GitError('Resolve working-tree changes to tracked events before creating a new event.')
 
 
+def check_work_files(root, work, reviewed_files):
+    _, parents = commit_details(root, work)
+    if len(parents) != 1:
+        raise EventError('The reviewed work must be a single-parent commit.')
+    changed = paths(_git(root, '--no-replace-objects', *DIFF, parents[0], work, '--')[0])
+    if not changed or sorted(reviewed_files) != sorted(changed):
+        raise EventError('Reviewed files_changed must exactly match the nonempty work commit diff.')
+
+
 def event_commit(directory, load_config, args):
     work = args.work_sha
     report = dict(operation='pub_event_commit', result='event_validation_failed', phase='validation',
@@ -96,10 +105,6 @@ def event_commit(directory, load_config, args):
         ref = 'refs/heads/' + args.expected_branch
         _git(root, 'check-ref-format', ref)
         check_target(root, load_config, args)
-        _, parents = commit_details(root, work)
-        if len(parents) != 1:
-            raise EventError('The reviewed work must be a single-parent commit.')
-        changed = paths(_git(root, '--no-replace-objects', *DIFF, parents[0], work, '--')[0])
         review = json.loads(args.review_file.read_text(encoding='utf-8-sig'), object_pairs_hook=_pairs)
         if not isinstance(review, dict) or review.keys() != REVIEW_FIELDS:
             raise EventError('Review JSON must contain exactly the six reviewed contribution fields.')
@@ -112,9 +117,7 @@ def event_commit(directory, load_config, args):
             created_at=now.strftime('%Y-%m-%dT%H:%M:%SZ'), change_id=args.change_id,
             branch=args.expected_branch, commit=work, **review,
         ))
-        reviewed_files = event['files_changed']
-        if not changed or sorted(reviewed_files) != sorted(changed):
-            raise EventError('Reviewed files_changed must exactly match the nonempty work commit diff.')
+        check_work_files(root, work, event['files_changed'])
         path = f'{EVENTS}/{event["event_id"]}.json'
         args = type(args)(**(vars(args) | dict(file=[path], message=f'Publish change {args.change_id}\n')))
 

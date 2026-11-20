@@ -158,6 +158,34 @@ def send_update(root, args, ref, old, report):
             raise GitError('Git push outcome is uncertain. Query the remote before retrying.')
 
 
+def work_history_changes_events(root, head, bases):
+    # Combined merge diffs show changes against every parent. An inherited
+    # event is checked at the commit that introduced it, not at the merge.
+    changes, _ = _git(root, '--no-replace-objects', 'log', '--full-history', '--root', '-c',
+                      '--format=', '--name-only', '--no-renames', '-z', head,
+                      *('^' + base for base in sorted(set(bases))), '--', '.group/events')
+    return bool(changes)
+
+
+def check_work_history(root, args, head, old):
+    bases = {old} if old is not None else set()
+    if not work_history_changes_events(root, head, bases):
+        return
+    # The target range can also inherit commits already published on other
+    # branches. Use live tips, never stale local tracking refs, as exclusions.
+    advertised, _ = _git(root, *TRANSPORT, 'ls-remote', '--heads', '--',
+                         args.expected_url, env_overrides=NETWORK_ENV)
+    for line in advertised.splitlines():
+        oid, _, ref = line.partition('\t')
+        if len(oid) != len(head) or not OBJECT_ID.fullmatch(oid) or not ref.startswith('refs/heads/'):
+            raise GitError('Could not establish the already published branch history.')
+        kind, code = _git(root, '--no-replace-objects', 'cat-file', '-t', oid, allowed=(0, 128))
+        if code == 0 and kind == 'commit':
+            bases.add(oid)
+    if work_history_changes_events(root, head, bases):
+        raise GitError('Work push would publish event changes; use the dedicated event publication procedure.')
+
+
 def push_work(directory, load_config, args):
     head = args.expected_head
     report = dict(operation='pub_push_work', result='not_executed', verified=False,
@@ -197,6 +225,7 @@ def push_work(directory, load_config, args):
                 raise GitError('Remote tip history is unavailable locally; review it before retrying.') from exc
             if ancestry:
                 raise GitError('Remote tip is not an ancestor of the reviewed commit.')
+        check_work_history(root, args, head, old)
         check_local(root, load_config, args)
         send_update(root, args, ref, old, report)
         check_destination(root, args)

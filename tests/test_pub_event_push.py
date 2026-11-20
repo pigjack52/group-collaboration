@@ -106,6 +106,16 @@ class EventPushTests(unittest.TestCase):
         self.assertIn('Invalid JSON', self.push('not_executed')['error'])
         self.assert_tip(self.head)
 
+    def test_reviewed_files_must_match_the_actual_work_diff(self):
+        event = json.loads((self.root / self.event_path).read_bytes())
+        event['files_changed'] = ['different.txt']
+        self.replace_event(json.dumps(event))
+        with patch.object(publication, 'send_update') as send:
+            report = self.push('not_executed')
+            send.assert_not_called()
+        self.assertIn('files_changed must exactly match', report['error'])
+        self.assert_tip(self.head)
+
     def test_wrong_change_or_work_sha(self):
         self.assertIn('does not match', self.push('not_executed', change_id='C-other')['error'])
         event = json.loads((self.root / self.event_path).read_text(encoding='utf-8'))

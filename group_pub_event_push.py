@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from group_events import EventError, _identifier, parse_event
 from group_git import GitError, _git, repository_root
 from group_pub_commit import commit_details, paths
-from group_pub_event import EVENTS
+from group_pub_event import EVENTS, check_work_files
 from group_pub_push import (
     NETWORK_ENV, OBJECT_ID, TRANSPORT, check_destination, check_literal_url,
     check_local, remote_head, send_update,
@@ -49,6 +49,7 @@ def inspect_event_commit(repository, args, group_id):
                     branch=args.expected_branch, change_id=args.change_id, commit=work)
     if any(event.get(field) != value for field, value in expected.items()):
         raise EventError('Committed event does not match the reviewed group, person, branch, change or work SHA.')
+    check_work_files(repository, work, event['files_changed'])
     return tree, path, blob, raw, event
 
 

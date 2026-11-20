@@ -12,7 +12,8 @@ python -B groupctl.py pub --push-event --person-id student01 --expected-branch p
 
 工具重新核對本機 HEAD、群組與成員資料、分支歸屬、遠端 URL 和 Git 操作狀態。
 E 必須以 A 為唯一父 Commit，tree 只能新增一個符合事件 schema 與指定參數的
-`change_published` JSON。工具以暫存 Git repository 讀取遠端可見分支 tip 上的事件，
+`change_published` JSON。工具也會重新核對事件的 `files_changed` 是否與 A 對其唯一父
+Commit 的實際變更一致，包含人工建立或恢復的 E。工具以暫存 Git repository 讀取遠端可見分支 tip 上的事件，
 檢查事件 ID、change ID 和分支與工作 SHA 的組合是否重複。目標分支須仍指向 A，
 才會嘗試以一般 fast-forward Push 將單一 ref 從 A 更新為 E。
 
@@ -83,9 +84,27 @@ python -B groupctl.py pub --event-commit --person-id student01 --expected-branch
 參數錯誤的退出碼為 2。遠端驗證只反映查詢當時的 A。事件須以 `--push-event` 推送且可由
 共享遠端查得後才算發布。重試會透過工作樹及已知本機分支與遠端追蹤 ref 的 tip
 檢查重複 change ID，以及同分支同工作 SHA 的既有事件。不同機器間的唯一性依靠
-唯一 ID 分配及後續共享遠端檢查。若中斷，依回報內的路徑、候選 SHA、HEAD 和 index
-確認完成到哪一階段。若留下事件檔或 E，保留原始紀錄並停止重試。本機恢復及事件
-推送由 `--push-event` 處理。
+唯一 ID 分配及後續共享遠端檢查。
+
+### PUB 中斷恢復
+
+保留原審閱資料、完整 SHA、`change_id` 與命令回報。先用 `git symbolic-ref --short HEAD`、
+`git rev-parse --verify HEAD`、`git status --short`、`git diff --cached` 和 `git diff`
+確認本機分支、提交及 index。遠端以已審閱 URL 上的即時 `git ls-remote --symref` 查詢為準。
+追蹤 ref 和 Push 退出碼可協助定位，但查詢失敗時遠端狀態仍未知。
+
+| 中斷位置 | 可採信的證據 | 安全續作與人工介入條件 |
+| --- | --- | --- |
+| A 已建立、尚未 Push | 本機個人分支指向 A，A 的父 Commit、diff 和 index 符合審閱結果；即時查到原審閱的遠端 tip。 | 以 A 與已確認的遠端舊值執行 `--push-work`。需要重新確認本機 A 時可先用 `--use-existing`。若分支、內容、index 或遠端舊值有疑義，先由操作者核對。 |
+| 工作 Push 可能成功、驗證失敗 | `verification_failed` 表示結果待查。即時查到 A 才能確認 A 已在目標分支。 | 同一份 `--push-work` 參數可重試。遠端為 A 時回 `already_present`；仍是原審閱舊值時可按原防護重試。其他 SHA 或持續查詢失敗時，先釐清狀態再繼續。 |
+| 事件檔已建立、HEAD 仍為 A | 回報的 `event_path`、磁碟上的原檔及其 JSON、HEAD、index、即時遠端 tip。若有 `candidate_commit`，檢查其父 Commit 與 tree。 | 保留原檔及 ID。這時沒有可直接 Push 的 E；重跑 `--event-commit` 會擋下原檔。由人查明檔案是否完整、與原審閱一致、是否已有發布，並確認暫存區後，才以原事件完成本機提交。E 驗證後再走 `--push-event`。 |
+| E 已建立、index 安裝失敗 | `phase=ref_updated`、本機 ref 指向 E，且 staged diff 與候選 tree 不一致。比較 `E^ = A`、E 的單一事件 blob、index 及工作樹。 | 保留 E 與本機內容，由人判定 staged 對應舊 index 或其他待保存變更，確認 lock 歸屬後再校正。核對完成後以原 E 續作 `--push-event`。 |
+| E 完整建立、尚未 Push | 本機 HEAD 為 E，父 Commit 為 A，E 只新增原事件，index 已核對；即時遠端 tip 為 A。 | 以原 A、E 和 `change_id` 執行 `--push-event`，預期遠端為 A。遇到結構、身分、內容或 tip 不符時停止，先人工查明。 |
+| 事件 Push 可能成功、驗證失敗 | `verification_failed` 或 `partial`；以即時 ref 和重新 fetch 的 E 與事件 blob 判斷。 | 保留原參數重試 `--push-event`。遠端為 E 時重新驗證；仍為 A 且原預期為 A 時走原防護。遠端已移動或內容持續無法驗證時，由人查明。 |
+| 遠端已存在 E | 即時 tip 精確等於 E，且獨立 fetch 取得與本機已審閱 E 一致的事件。 | 原 `--push-event` 可用 A 或 E 作為預期遠端 tip，驗證成功回 `already_published`，不再 Push。若遠端已前進到其他 SHA，人工核對 E 的可達性與原事件是否仍在 tip。 |
+
+遇到來源未明的 lock、未完成的 Git 操作或無法辨認的 staged 內容，停止寫入並先保存證據。
+恢復期間保留原 Commit、原事件和其他本機變更，避免強制更新遠端或清除工作樹。
 
 ## 步驟 3-8C-2：PUB 工作 Commit Push
 
@@ -109,6 +128,10 @@ python -B groupctl.py pub --push-work --person-id student01 --expected-branch pe
 
 工具即時查詢目標分支，檢查遠端 tip 是否符合審閱值，並確認既有 tip 是工作 Commit
 的祖先。若當地缺少遠端 tip 的歷史，先取得並審閱該歷史，再決定是否重試。
+Push 前會檢查新增到目標分支的提交歷史。若其中有尚未發布的 `.group/events/` 變更，
+即使最後的 tree 已移除該事件，Work Push 仍會拒絕，請使用對應的事件發布程序。
+沿用已發布歷史中的事件可以繼續推送工作。其他分支上的既有歷史以遠端即時公布的
+tip 與本機可驗證的 Git 物件為準。
 Push 只送出指定 SHA 到指定個人分支的 refspec。Push 當下的 `pre-push` guard 會核對
 Git 收到的目的地、來源 SHA、目標 ref 與伺服器宣告的舊 SHA。伺服器接受更新時，
 Git 再以該舊 SHA 比對 ref。Push 返回成功後，工具另執行一次 `git ls-remote`，
