@@ -3,6 +3,10 @@ import json
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
+
+import group_int
+import groupctl
 
 from test_events import sample
 import test_pub
@@ -35,7 +39,8 @@ class IntPreflightTests(unittest.TestCase):
         self.event_dir.mkdir()
         self.event = dict(sample('change_published'), event_id='E-int', group_id='G-test',
                           person_id='P02', change_id='C-int', branch=SOURCE,
-                          commit=self.work, files_changed=['tracked.txt', 'second.txt'])
+                          commit=self.work, files_changed=['tracked.txt', 'second.txt'],
+                          proposed_for_integration=True)
         self.tip = self.record(self.event)
         self.git('update-ref', SOURCE_REF, self.tip)
         self.git('switch', TARGET)
@@ -203,3 +208,179 @@ class IntPreflightTests(unittest.TestCase):
 
     def test_personal_target_must_belong_to_operator(self):
         self.run_preflight('target_unsafe', person='P02')
+
+    def ff_args(self, **overrides):
+        expected = dict(person_id='P01', change_id='C-int', target_branch=TARGET,
+                        expected_head=self.base, work_sha=self.work,
+                        expected_event_id='E-int',
+                        expected_event_blob=self.git('rev-parse', f'{self.tip}:.group/events/E-int.json'),
+                        expected_source_ref=SOURCE_REF, expected_source_tip=self.tip,
+                        expected_incoming=','.join(self.git('rev-list', f'{self.base}..{self.work}').splitlines()) or 'none')
+        expected.update(overrides)
+        return ['int', '--ff-only', '--confirm-reviewed', '--confirm-unproposed',
+                *(arg for key, value in expected.items() for arg in
+                  ('--' + key.replace('_', '-'), value))]
+
+    def ff(self, args, status, blocker=None):
+        before = self.snapshot()
+        refs = group_int.all_refs(self.root)
+        result = subprocess.run([sys.executable, '-B', str(test_pub.CLI), *args],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, encoding='utf-8', timeout=45)
+        self.assertEqual(result.returncode, int(status not in (
+            'local_fast_forward_verified', 'already_in_history')), result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['status'], status, report)
+        if blocker:
+            self.assertIn(blocker, ' '.join(report['blockers']))
+        if status == 'local_fast_forward_verified':
+            refs['refs/heads/' + TARGET] = self.work + '\t'
+        elif status != 'write_unverified':
+            self.assertEqual(self.snapshot(), before)
+        self.assertEqual(group_int.all_refs(self.root), refs)
+        return report
+
+    def test_ff_advances_only_target_to_work_and_replay_is_noop(self):
+        args = self.ff_args()
+        report = self.ff(args, 'local_fast_forward_verified')
+        self.assertEqual(report['changed_refs'], ['refs/heads/' + TARGET])
+        self.assertEqual(report['after']['head'], self.work)
+        self.assertFalse(report['after']['git_operations'])
+        self.assertFalse(report['after']['unmerged_paths'])
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertEqual(self.git('write-tree'), self.git('rev-parse', self.work + '^{tree}'))
+        self.assertFalse(self.event_dir.exists())
+        self.ff(args, 'already_in_history')
+        self.ff(self.ff_args(expected_head=self.work, expected_incoming='none'), 'already_in_history')
+        self.file.write_text('more', encoding='utf-8')
+        tip = self.commit('after work')
+        self.ff(self.ff_args(expected_head=tip, expected_incoming='none'), 'already_in_history')
+
+    def test_ff_rejects_stale_or_unreviewed_evidence(self):
+        for overrides, reason in (
+            (dict(expected_head=self.work), 'stale'),
+            (dict(expected_source_tip=self.work), 'source_tip_sha'),
+            (dict(expected_source_ref='refs/remotes/origin/main'), 'source_ref'),
+            (dict(expected_event_blob=self.work), 'event_blob_sha'),
+            (dict(expected_event_id='E-other'), 'event_path'),
+            (dict(change_id='c-int'), 'change_id'),
+            (dict(work_sha=self.tip), 'candidate_work_sha'),
+            (dict(expected_incoming=self.work), 'commit range'),
+        ):
+            with self.subTest(overrides=overrides):
+                self.ff(self.ff_args(**overrides), 'blocked', reason)
+        args = self.ff_args()
+        self.replace_publication(summary='changed after review')
+        self.ff(args, 'blocked', 'event_blob_sha')
+        args = self.ff_args()
+        self.git('switch', SOURCE)
+        self.git('commit', '--allow-empty', '-m', 'advanced publisher tip with same event')
+        self.git('update-ref', SOURCE_REF, 'HEAD')
+        self.git('switch', TARGET)
+        self.ff(args, 'blocked', 'source_tip_sha')
+
+    def test_ff_requires_separate_confirmation_for_unproposed(self):
+        self.replace_publication(proposed_for_integration=False)
+        args = self.ff_args()
+        args.remove('--confirm-unproposed')
+        self.ff(args, 'blocked', '--confirm-unproposed')
+        self.ff([*args, '--confirm-unproposed'], 'local_fast_forward_verified')
+
+    def test_ff_refuses_event_only_candidate(self):
+        self.replace_publication(commit=self.tip)
+        work = self.git('rev-parse', 'refs/heads/' + SOURCE + '^')
+        self.ff(self.ff_args(work_sha=work), 'blocked', 'event commit')
+
+    def test_ff_rejects_divergence_and_unrelated_history(self):
+        self.file.write_text('local', encoding='utf-8')
+        local = self.commit('local work')
+        self.ff(self.ff_args(expected_head=local), 'blocked', 'non-fast-forward')
+        tree = self.git('rev-parse', local + '^{tree}')
+        orphan = self.git('commit-tree', tree, '-m', 'unrelated')
+        self.git('update-ref', 'refs/heads/' + TARGET, orphan)
+        self.ff(self.ff_args(expected_head=orphan), 'blocked', 'common ancestor')
+
+    def test_ff_refuses_tracking_ahead_or_diverged(self):
+        self.git('branch', '--set-upstream-to=' + SOURCE, TARGET)
+        self.ff(self.ff_args(), 'blocked', 'Configured upstream')
+        self.git('branch', '--unset-upstream', TARGET)
+        tracking = 'refs/remotes/origin/' + TARGET
+        self.git('update-ref', tracking, self.work)
+        self.ff(self.ff_args(), 'blocked', 'synchronize')
+        self.file.write_text('local', encoding='utf-8')
+        local = self.commit('local work')
+        self.ff(self.ff_args(expected_head=local), 'blocked', 'synchronize')
+
+    def test_ff_refuses_canonical_or_other_operator(self):
+        self.ff(self.ff_args(person_id='P02'), 'blocked', 'operator-owned')
+        self.git('switch', 'main')
+        self.ff(self.ff_args(target_branch='main'), 'blocked', 'canonical and main')
+
+    def test_ff_refuses_dirty_categories(self):
+        args = self.ff_args()
+        self.file.write_text('local', encoding='utf-8')
+        self.ff(args, 'blocked', 'dirty')
+        self.git('restore', '--', 'tracked.txt')
+        (self.root / 'extra').write_text('local', encoding='utf-8')
+        self.ff(args, 'blocked', 'dirty')
+        self.git('add', 'extra')
+        self.ff(args, 'blocked', 'dirty')
+
+    def test_ff_refuses_operation_lock_and_hidden_flags(self):
+        args = self.ff_args()
+        for name, reason in (('MERGE_HEAD', 'Unfinished'), ('index.lock', 'index lock')):
+            marker = self.root / '.git' / name
+            marker.write_text(self.work + '\n', encoding='ascii')
+            self.ff(args, 'blocked', reason)
+            self.assertTrue(marker.exists())
+            marker.unlink()
+        for flag in ('assume-unchanged', 'skip-worktree'):
+            self.git('update-index', '--' + flag, 'tracked.txt')
+            self.ff(args, 'blocked', 'Index flags')
+            self.git('update-index', '--no-' + flag, 'tracked.txt')
+
+    def test_ff_refuses_replace_and_external_drivers(self):
+        args = self.ff_args()
+        self.git('replace', self.work, self.base)
+        self.ff(args, 'blocked', 'Replace objects')
+        self.git('replace', '-d', self.work)
+        for key, reason in (('merge.external.driver', 'custom merge drivers'),
+                            ('filter.external.smudge', 'external Git filters')):
+            self.git('config', key, 'external')
+            self.ff(args, 'blocked', reason)
+            self.git('config', '--unset', key)
+
+    def test_ff_refuses_candidate_submodule(self):
+        self.git('switch', SOURCE)
+        self.git('update-index', '--add', '--cacheinfo', f'160000,{self.work},nested')
+        self.git('commit', '-m', 'candidate submodule')
+        self.work = self.git('rev-parse', 'HEAD')
+        self.tip = self.record(dict(self.event, commit=self.work))
+        self.git('update-ref', SOURCE_REF, self.tip)
+        self.git('switch', TARGET)
+        self.ff(self.ff_args(), 'blocked', 'Candidate contains submodules')
+
+    def test_ff_git_failure_preserves_ignored_collision(self):
+        (self.root / '.git/info/exclude').write_text('second.txt\n', encoding='utf-8')
+        path = self.root / 'second.txt'
+        path.write_text('local ignored content', encoding='utf-8')
+        report = self.ff(self.ff_args(), 'write_unverified', 'overwritten')
+        self.assertEqual(report['after']['head'], self.base)
+        self.assertEqual(report['changed_refs'], [])
+        self.assertEqual(path.read_text(encoding='utf-8'), 'local ignored content')
+
+    def test_ff_serializes_two_invocations(self):
+        from argparse import Namespace
+        args = self.ff_args()
+        values = dict(zip((key[2:].replace('-', '_') for key in args[4::2]), args[5::2]))
+        real_preflight = group_int.preflight
+
+        def preflight_while_locked(*params):
+            self.ff(args, 'blocked', 'INT write lock exists')
+            return real_preflight(*params)
+
+        with patch('group_int.preflight', side_effect=preflight_while_locked):
+            report = group_int.fast_forward(self.root, groupctl.load_config,
+                                             Namespace(confirm_unproposed=True, **values))
+        self.assertEqual(report['status'], 'local_fast_forward_verified', report)
+        self.assertFalse((self.root / '.git/groupctl-int.lock').exists())

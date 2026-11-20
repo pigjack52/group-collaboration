@@ -9,7 +9,7 @@ from group_git import GitError, repository_root, inspect_status, format_status
 from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
-from group_int import preflight as int_preflight
+from group_int import fast_forward, preflight as int_preflight
 from group_test import run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
@@ -75,10 +75,21 @@ def main(argv=None):
     modes.add_argument('--discover', action='store_true')
     modes.add_argument('--update', action='store_true')
     integration = commands.add_parser('int', help='Inspect a published change and local integration target')
-    integration.add_argument('--preflight', action='store_true', required=True)
+    modes = integration.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--preflight', action='store_true')
+    modes.add_argument('--ff-only', action='store_true')
     integration.add_argument('--person-id', required=True)
     integration.add_argument('--change-id', required=True)
     integration.add_argument('--target-branch', required=True, help='Exact local target branch name')
+    integration.add_argument('--expected-head')
+    integration.add_argument('--work-sha')
+    integration.add_argument('--expected-event-id')
+    integration.add_argument('--expected-event-blob')
+    integration.add_argument('--expected-source-ref')
+    integration.add_argument('--expected-source-tip')
+    integration.add_argument('--expected-incoming', help='Comma-separated full T..A SHAs, or none')
+    integration.add_argument('--confirm-reviewed', action='store_true')
+    integration.add_argument('--confirm-unproposed', action='store_true')
     test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
     pub = commands.add_parser('pub', help='Publication preflight, commit and push work or events')
@@ -103,6 +114,15 @@ def main(argv=None):
     pub.add_argument('--confirm-reviewed', action='store_true',
                      help='Confirm human authorization and review of the actual contribution')
     args = parser.parse_args(argv)
+    if args.command == 'int':
+        reviewed = (args.expected_head, args.work_sha, args.expected_event_id,
+                    args.expected_event_blob, args.expected_source_ref,
+                    args.expected_source_tip, args.expected_incoming)
+        if args.ff_only and not (all(reviewed) and args.confirm_reviewed):
+            integration.error('--ff-only requires all reviewed evidence options and --confirm-reviewed')
+        if args.preflight and (any(value is not None for value in reviewed)
+                               or args.confirm_reviewed or args.confirm_unproposed):
+            integration.error('Reviewed evidence options require --ff-only')
     if args.command == 'pub':
         push_options = (args.remote, args.expected_url, args.expected_remote_head)
         event_options = (args.work_sha, args.change_id, args.review_file)
@@ -153,8 +173,11 @@ def main(argv=None):
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'int':
-            report = int_preflight(Path.cwd(), load_config, args.person_id,
-                                   args.change_id, args.target_branch)
+            if args.ff_only:
+                report = fast_forward(Path.cwd(), load_config, args)
+            else:
+                report = int_preflight(Path.cwd(), load_config, args.person_id,
+                                       args.change_id, args.target_branch)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'test':

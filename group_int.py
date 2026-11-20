@@ -1,5 +1,6 @@
 """Resolve a published change and inspect a local integration target."""
 import os
+from pathlib import Path
 import re
 
 from group_events import EventError
@@ -114,6 +115,20 @@ def inspect_candidate(root, record, refs, members, report):
         evidence['target_work_merge_bases'] = bases.splitlines()
         if not bases:
             raise GitError('Target and candidate have no available common ancestor.')
+        report['incoming_commits'] = incoming_commits(root, target, work)
+
+
+def incoming_commits(root, target, work):
+    commits, _ = _git(root, *GIT, 'rev-list', target + '..' + work, '--')
+    return sorted(commits.splitlines())
+
+
+def check_git_environment(root):
+    local_env, _ = _git(root, 'rev-parse', '--local-env-vars')
+    if set(local_env.splitlines()).intersection(os.environ) or {
+        'GIT_NAMESPACE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE',
+    }.intersection(os.environ):
+        raise GitError('Repository-local Git environment overrides are unsupported.')
 
 
 def preflight(directory, load_config, person_id, change_id, target_branch):
@@ -135,9 +150,7 @@ def preflight(directory, load_config, person_id, change_id, target_branch):
                                   validation='No test, build or merge was run.'))
     blockers = report['blockers']
     try:
-        local_env, _ = _git(directory, 'rev-parse', '--local-env-vars')
-        if set(local_env.splitlines()).intersection(os.environ) or 'GIT_NAMESPACE' in os.environ:
-            raise GitError('Repository-local Git environment overrides are unsupported.')
+        check_git_environment(directory)
         root = repository_root(directory)
         config = load_config(root / '.group/group.json')
         group_id, canonical = config['group_id'], config['canonical_branch']
@@ -161,6 +174,7 @@ def preflight(directory, load_config, person_id, change_id, target_branch):
             if kind == 'commit':
                 report['target_sha'] = target_sha
         report['target_ref'] = target
+        report['target_upstream_ref'] = before.upstream
         tracking = refs.get(TRACKING + target_branch)
         report['target_tracking_sha'] = tracking[0] if tracking and not tracking[1] else None
         owner = personal_owner(target_branch)
@@ -205,3 +219,149 @@ def preflight(directory, load_config, person_id, change_id, target_branch):
     except (EventError, GitError, OSError, StatusError, ValueError) as exc:
         blockers.append(str(exc))
     return report
+
+
+def all_refs(root):
+    refs, _ = _git(root, 'for-each-ref', '--format=%(refname)%09%(objectname)%09%(symref)')
+    return dict(line.split('\t', 1) for line in refs.splitlines())
+
+
+def write_safety(root, work):
+    options, filters_disabled = status_config(root)
+    _, drivers = _git(root, 'config', '--get-regexp', r'^merge\..*\.driver$', allowed=(0, 1))
+    if filters_disabled or drivers == 0:
+        raise GitError('External filters or custom merge drivers are unsupported for INT writes.')
+    tree, _ = _git(root, *GIT, 'ls-tree', '-r', '-z', work)
+    if any(entry.startswith('160000 ') for entry in tree.split('\0')):
+        raise GitError('Candidate contains submodules; INT write refused.')
+    return options
+
+
+def observe_target(root, canonical, options):
+    direct, _ = _git(root, 'symbolic-ref', '--no-recurse', '--quiet', 'HEAD', allowed=(0, 1))
+    state = inspect_status(root, canonical, allow_missing_upstream=True,
+                           status_config=options, submodules='none')
+    safety, blockers = index_safety(root)
+    snapshot = dict(head=state.head, head_ref=direct, staged=state.staged,
+                    unstaged=state.unstaged, untracked=state.untracked, **safety)
+    if not state.clean:
+        blockers.append('Worktree, index or untracked files are dirty.')
+    if safety['submodule_worktrees_not_inspected']:
+        blockers.append('Target index contains submodules.')
+    return snapshot, blockers
+
+
+def fast_forward(directory, load_config, args):
+    report = dict(operation='int_ff_only', status='blocked', blockers=[], attempted=False,
+                  validation='Build, tests and semantic review were not performed.',
+                  remote_state='Local tracking refs may be stale; remote state was not verified.')
+    try:
+        check_git_environment(directory)
+        root = repository_root(directory)
+        git_dir, _ = _git(root, 'rev-parse', '--absolute-git-dir')
+        common, _ = _git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        if Path(git_dir).resolve() != Path(common).resolve():
+            raise GitError('Linked worktrees are unsupported for INT writes.')
+        lock = Path(common) / 'groupctl-int.lock'
+        try:
+            lock.mkdir()
+        except FileExistsError as exc:
+            raise GitError('INT write lock exists; inspect it before retrying.') from exc
+        try:
+            apply_fast_forward(root, load_config, args, report)
+        finally:
+            lock.rmdir()
+    except (EventError, GitError, OSError, StatusError, ValueError) as exc:
+        if report['attempted']:
+            report['status'] = 'write_unverified'
+        report['blockers'].append(str(exc))
+    return report
+
+
+def apply_fast_forward(root, load_config, args, report):
+    before_refs = all_refs(root)
+    if any(ref.startswith('refs/replace/') for ref in before_refs):
+        raise GitError('Replace objects are unsupported for INT writes.')
+    checked = preflight(root, load_config, args.person_id, args.change_id, args.target_branch)
+    report['preflight'] = checked
+    if checked['blockers']:
+        report['blockers'].extend(checked['blockers'])
+        return
+    if checked['worktree']['submodule_worktrees_not_inspected']:
+        raise GitError('Target index contains submodules.')
+    canonical = load_config(root / '.group/group.json')['canonical_branch']
+    if (checked['target_kind'] != 'personal' or args.target_branch.casefold() in
+            {canonical.casefold(), 'main'} or personal_owner(args.target_branch) != args.person_id):
+        raise GitError('INT writes require the operator-owned personal branch; canonical and main are refused.')
+    target, work = checked['target_ref'], checked['candidate_work_sha']
+    head = checked['target_sha']
+    evidence = checked['ancestry_evidence']
+    event_path = f'.group/events/{args.expected_event_id}.json'
+    expected = dict(change_id=args.change_id, event_id=args.expected_event_id, event_path=event_path,
+                    event_blob_sha=args.expected_event_blob.lower(), candidate_work_sha=args.work_sha.lower(),
+                    source_ref=args.expected_source_ref, source_tip_sha=args.expected_source_tip.lower())
+    observed = dict(checked, **evidence, change_id=checked['candidate_event']['change_id'])
+    mismatches = [field for field, value in expected.items() if observed[field] != value]
+    if mismatches:
+        raise GitError('Reviewed evidence changed: ' + ', '.join(mismatches))
+    publication = dict(ref=expected['source_ref'], tip_sha=expected['source_tip_sha'],
+                       event_path=event_path, event_blob_sha=expected['event_blob_sha'])
+    if publication not in checked['source_refs']:
+        raise GitError('Reviewed event must be present at the declared source tracking tip.')
+    if not checked['candidate_event']['proposed_for_integration'] and not args.confirm_unproposed:
+        raise GitError('Publication is not proposed for integration; --confirm-unproposed is required.')
+    paths, _ = _git(root, *GIT, 'diff-tree', '--root', '-m', '-r', '--no-commit-id',
+                    '--no-renames', '--name-only', '-z', work, '--')
+    paths = list(filter(None, paths.split('\0')))
+    if event_path in paths or (paths and all(path.startswith('.group/events/') for path in paths)):
+        raise GitError('Candidate appears to be an event commit; expected a work commit.')
+    options = write_safety(root, work)
+    old = args.expected_head.lower()
+    if len(old) != len(head) or not re.fullmatch(r'[0-9a-f]+', old):
+        raise GitError('Expected HEAD must be a full hexadecimal object ID.')
+    tracking = checked['target_tracking_sha']
+    if tracking and not ancestor(root, tracking, head):
+        raise GitError('Target is behind or diverges from its tracking ref; synchronize first.')
+    upstream = checked['target_upstream_ref']
+    if upstream and upstream != TRACKING + args.target_branch:
+        oid, _, symbolic = before_refs.get(upstream, '').partition('\t')
+        if not oid or symbolic or not ancestor(root, oid, head):
+            raise GitError('Configured upstream is symbolic, ahead or diverged; synchronize first.')
+    if head != old and not (head == work and ancestor(root, old, work)):
+        raise GitError('Expected target HEAD is stale.')
+    incoming = incoming_commits(root, old, work)
+    report['incoming_commits'] = incoming
+    reviewed = [] if args.expected_incoming == 'none' else args.expected_incoming.lower().split(',')
+    if sorted(reviewed) != incoming:
+        raise GitError('Incoming commit range differs from the reviewed T..A list.')
+    before, blockers = observe_target(root, canonical, options)
+    report['before'] = before
+    if blockers or (before['head_ref'], before['head']) != (target, head) or all_refs(root) != before_refs:
+        raise GitError('Git state is unsafe or changed before INT: ' + ' '.join(blockers))
+    if evidence['work_is_ancestor_of_target']:
+        report['status'] = 'already_in_history'
+        return
+    if not ancestor(root, head, work):
+        raise GitError('Target and candidate diverge; non-fast-forward integration is required.')
+
+    report['attempted'] = True
+    try:
+        output, code = _git(root, *GIT, *options, '-c', 'core.hooksPath=' + os.devnull,
+                            '-c', 'rerere.enabled=false', '-c', 'maintenance.auto=false',
+                            '-c', 'gc.auto=0', '-c', 'submodule.recurse=false',
+                            '-c', f'branch.{args.target_branch}.mergeOptions=',
+                            'merge', '--ff-only', '--no-commit', '--no-autostash',
+                            '--no-overwrite-ignore', '--no-edit', '--', work)
+        report.update(git_output=output, git_exit=code)
+    except GitError as exc:
+        report['blockers'].append(str(exc))
+    finally:
+        after, blockers = observe_target(root, canonical, options)
+        report['after'] = after
+        expected_refs = dict(before_refs, **{target: work + '\t'})
+        actual_refs = all_refs(root)
+        report['changed_refs'] = sorted(ref for ref in before_refs.keys() | actual_refs.keys()
+                                        if before_refs.get(ref) != actual_refs.get(ref))
+    if blockers or (after['head_ref'], after['head']) != (target, work) or actual_refs != expected_refs:
+        raise GitError('Fast-forward postconditions could not be verified; inspect the preserved Git state.')
+    report['status'] = 'write_unverified' if report['blockers'] else 'local_fast_forward_verified'

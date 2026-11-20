@@ -1,5 +1,41 @@
 # Group Collaboration System
 
+## 步驟 3-9C-2：INT 本機 Fast-forward
+
+先執行下方 `int --preflight`，核對事件、實際 diff、介面與
+`incoming_commits` 列出的全部 `T..A` 工作歷史。確認操作者獨占使用此工作目錄
+及目標 ref 後，將審閱過的值帶入 PowerShell 指令。
+
+```powershell
+python -B groupctl.py int --ff-only --person-id student01 --change-id C-17 `
+  --target-branch people/student01/my-topic --expected-head $targetSha --work-sha $workSha `
+  --expected-event-id $eventId --expected-event-blob $eventBlobSha `
+  --expected-source-ref $sourceRef --expected-source-tip $sourceTipSha `
+  --expected-incoming ($reviewedCommits -join ',') --confirm-reviewed
+```
+
+`$targetSha` 和 `$workSha` 分別取自 `target_sha` 和 `candidate_work_sha`。
+事件路徑由事件 ID 推導為 `.group/events/<event_id>.json`，來源 ref 與 tip 取自
+`ancestry_evidence` 的 `source_ref` 及 `source_tip_sha`，該 tip 必須含有審閱的事件 blob。
+提交清單以逗號分隔完整 SHA，
+順序不限，空範圍以 `none` 表示。若事件未提議整合，須額外提供 `--confirm-unproposed`。
+PUB 的事件提交及來源 tip 只供查證，Git 的候選參數使用工作 SHA。
+
+寫入前取得 Git 目錄中的 INT 專用互斥鎖，重新檢查候選、全部 refs、目標及工作目錄。
+鎖只協調本工具的 INT 寫入，外部 Git、IDE 和其他命令仍須停止寫入。中斷後若鎖仍存在，
+工具會阻擋，保留現場供操作者查驗。支援已開啟且屬於操作者的個人分支，拒絕 canonical、
+main、linked worktree、變髒或有未完成操作的工作目錄，以及不支援的 Git 設定與歷史。
+已知目標落後或分歧於本機 tracking ref 時，先處理同步。INT 使用本機 tracking refs，
+其資料可能過期。命令不 fetch，也不切換分支。
+
+成功狀態 `local_fast_forward_verified` 表示已核對目標精確推進至 A、index 與工作樹
+乾淨、沒有待合併或衝突狀態，且其他 refs 維持原值。`already_in_history` 表示 A 已位於
+目標歷史，包含以原始審閱資料重試且目標已精確停在 A 的情況。兩者退出碼皆為 0。
+`blocked` 表示拒絕操作。`write_unverified` 表示已嘗試 Git 寫入但命令或事後驗證
+失敗，須依輸出的現場證據查驗。兩者退出碼皆為 1，參數錯誤為 2。忽略檔案碰撞會
+阻擋 FF。Git 嘗試操作時可能更新 `ORIG_HEAD`，工具保留這類現場資訊。以上狀態只涵蓋本機 Git，建置、測試、語意審查及遠端發布
+未由這個模式執行。
+
 ## 步驟 3-9B：INT 候選查證與安全預檢
 
 ```powershell
