@@ -1,3 +1,23 @@
+# AI 代理協作與 TEST 工程指引（Protocol 0.1）
+
+本專案提供 `groupctl.py` 協助學生與本機 AI 代理透過共享 GitHub Repository 協作。完整規格見 `specs/00–07`，可攜式代理入口與 Skill 見 [AGENT_COLLABORATION.md](AGENT_COLLABORATION.md) 與 [.agents/skills/group-collaboration/SKILL.md](.agents/skills/group-collaboration/SKILL.md)。
+
+## 0. 七大人類指令對應總覽
+
+執行任何協作指令前，先讀取 `.group/group.json` 確認 `group_id`、`canonical_branch` 與 `assignment_file`：
+
+| 指令 | 主要 `groupctl.py` 機械命令 | AI 與人類必須負責的判斷 |
+| --- | --- | --- |
+| `SYNC` | `sync --discover`；乾淨個人分支確認安全後 `sync --update` | 判讀新事件與 canonical 變更對目前假設的影響；不自動合併無關個人分支。 |
+| `PUB` | `pub --preflight` → `--work-commit`／`--use-existing` → `--push-work` → `--event-commit` → `--push-event` | 審閱真實 diff、排除秘密與垃圾檔、詳實填寫介面變更與已知問題；推送並遠端驗證成功後才算發布。 |
+| `INT <C-ID>` | `int --preflight` → `--ff-only` 或（`--prepare-merge` → `--inspect-merge` → `--commit-merge`）→ `--verify` → `--publish-result` | 審閱實際 diff 與衝突意圖；衝突無法安全解決時停下並發布 `blocker`；**不得預設 `semantic_review=pass`**。 |
+| `REV <C-ID>` | `rev --inspect` → `rev --publish --inspected-commit <SHA> --diff-inspected --verdict ...` | 審閱實際 diff、周邊程式與測試；**審查通過絕不自動合併**。 |
+| `TEST [scope]` | `test --person-id <id> [--scope current\|main\|<C-ID>] [--isolated] [--publish ...]` | 依下方第 1–6 節執行完整驗證、調查失敗根因與設計人工驗證；缺測試或零測試不得判為 `pass`。 |
+| `STATUS` | `status`（搭配 `sync --discover` 確認遠端新鮮度） | 回報分支、HEAD、dirty、canonical 關係、待整合事件、可歸屬測試、blockers 與下一步建議。 |
+| `FINAL` | `final --prepare` → **向真人展示 `.group/final/candidate.md`** → `final --publish --confirmation-file ... --confirm-human` | 核對確切 canonical commit、未整合變更、reviews/blockers 與最終測試；**嚴禁替真人捏造確認**。 |
+
+---
+
 # AI 代理的 TEST 工程指引
 
 學生輸入 `TEST [scope]` 時，依本指引執行。Codex 或其他代理都可以從 Repository 根目錄讀取此檔。以 [指令定義](specs/04_command_reference.md)、[TEST 程序](specs/05_command_procedures.md#5-test)、[AI 工程責任](specs/06_agent_behavior_specification.md)及[驗證規格](specs/07_testing_and_finalization.md)為準。
