@@ -248,12 +248,13 @@ def read_diagnostics(payload, replacements):
                 truncated=len(entries) < total or any(entry['truncated_fields'] for entry in entries))
 
 
-def run_tests(root, config, person_id):
+def run_tests(root, config, person_id, *, human_checks=None):
     root = Path(root)
     if config.get('protocol_version') != '0.1':
         raise EventError('Unsupported configuration protocol_version')
     if person_id not in {m['person_id'] for m in read_members(root)}:
         raise EventError('person_id is not a configured group member')
+    checks = [c.strip() for c in (human_checks or []) if isinstance(c, str) and c.strip()]
     before = snapshot(root, config['canonical_branch'])
     now = datetime.now(timezone.utc)
     event = dict(protocol_version='0.1',
@@ -262,7 +263,7 @@ def run_tests(root, config, person_id):
                  person_id=person_id, created_at=now.isoformat().replace('+00:00', 'Z'),
                  related_events=[], scope='current_branch', commit=before[1],
                  commands=[], automated_result='not_available', passed=0, failed=0,
-                 skipped=0, human_checks_required=[], summary='Validation not started.')
+                 skipped=0, human_checks_required=checks, summary='Validation not started.')
     validate_event(event)
     detail = ''
     evidence = dict(branch=before[0], counts_available=False, returncode=None,
@@ -368,10 +369,11 @@ def run_tests(root, config, person_id):
 
 def run_scoped_tests(root, config, person_id, scope='current', *, isolated=False,
                      publish=False, remote=None, expected_url=None,
-                     expected_remote_head=None, confirm_reviewed=False):
+                     expected_remote_head=None, confirm_reviewed=False,
+                     human_checks=None):
     """Run TEST for current, main/canonical, or <change_id> scope using an isolated worktree."""
     if scope in ('current', 'current_branch') and not isolated and not publish:
-        return run_tests(root, config, person_id)
+        return run_tests(root, config, person_id, human_checks=human_checks)
 
     from group_event_publish import (
         collect_known_events, commit_event_file, new_event_id, push_and_verify_event, utc_now,
@@ -385,6 +387,7 @@ def run_scoped_tests(root, config, person_id, scope='current', *, isolated=False
         raise EventError('Unsupported configuration protocol_version')
     if person_id not in {m['person_id'] for m in read_members(root)}:
         raise EventError('person_id is not a configured group member')
+    checks = [c.strip() for c in (human_checks or []) if isinstance(c, str) and c.strip()]
 
     canonical = config['canonical_branch']
     state = inspect_status(root, canonical, allow_missing_upstream=True)
@@ -438,7 +441,7 @@ def run_scoped_tests(root, config, person_id, scope='current', *, isolated=False
         passed=outcome['passed'],
         failed=outcome['failed'],
         skipped=outcome['skipped'],
-        human_checks_required=[],
+        human_checks_required=checks,
         summary=f'Isolated worktree unittest ({event_scope} @ {target_sha[:12]}): {outcome["summary"]}',
         execution=dict(
             branch=recorded_branch,

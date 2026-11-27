@@ -37,10 +37,13 @@ class ThreeMemberAcceptanceTests(unittest.TestCase):
             git(base, 'clone', str(remote), str(seed))
             git(seed, 'config', 'user.name', 'Seed')
             git(seed, 'config', 'user.email', 'seed@example.com')
+            (seed / '.gitignore').write_text('.group/local/*\n!.group/local/.gitkeep\n', encoding='utf-8')
             (seed / '.group/assignment').mkdir(parents=True)
             (seed / '.group/members').mkdir(parents=True)
             (seed / '.group/events').mkdir(parents=True)
             (seed / '.group/final').mkdir(parents=True)
+            (seed / '.group/local').mkdir(parents=True)
+            (seed / '.group/local/.gitkeep').write_text('', encoding='utf-8')
             (seed / '.group/group.json').write_text(json.dumps({
                 'protocol_version': '0.1',
                 'group_id': 'group-demo',
@@ -148,9 +151,7 @@ class ThreeMemberAcceptanceTests(unittest.TestCase):
             self.assertEqual(rev_pub.returncode, 0, rev_pub.stdout + rev_pub.stderr)
             self.assertFalse((p22 / 'parser.py').exists())
 
-            # Steps 7-8: P22 integrates C-01 cleanly (non-conflicting merge + verify + publish integration_result).
-            # Remove disposable sync-discover cache before conservative INT non-FF merge preparation.
-            (p22 / '.group/local/sync-discover.json').unlink(missing_ok=True)
+            # Steps 7-8: P22 integrates C-01 cleanly right after SYNC (keeping sync-discover.json cache intact).
             pre1 = json.loads(run_cli(
                 p22, 'int', '--preflight', '--person-id', 'P22',
                 '--change-id', 'C-01', '--target-branch', branches['P22'],
@@ -229,7 +230,6 @@ class ThreeMemberAcceptanceTests(unittest.TestCase):
 
             # P22 discovers C-02, hits real Git conflict, inspects, resolves deliberately, commits, verifies, publishes.
             self.assertEqual(run_cli(p22, 'sync', '--discover').returncode, 0)
-            (p22 / '.group/local/sync-discover.json').unlink(missing_ok=True)
             pre2 = json.loads(run_cli(
                 p22, 'int', '--preflight', '--person-id', 'P22',
                 '--change-id', 'C-02', '--target-branch', branches['P22'],

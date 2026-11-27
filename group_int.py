@@ -378,9 +378,12 @@ def run_integration(root, args, report, prepare, before_refs, checked, options, 
                 raise GitError('Merge preparation requires exactly one available merge base.')
             write_safety(root, bases[0])
             # Non-FF Git merge can overwrite ignored files despite --no-overwrite-ignore.
-            ignored, _ = _git(root, 'ls-files', '--others', '--ignored', '--exclude-standard',
-                              '--directory', '-z')
-            if ignored:
+            ignored_raw, _ = _git(root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z')
+            ignored_paths = [
+                p for p in filter(None, ignored_raw.split('\0'))
+                if not _is_safe_local_cache(root, p, (head, work, bases[0]))
+            ]
+            if ignored_paths:
                 raise GitError('Ignored untracked paths may be overwritten by Git; '
                                'merge preparation requires a worktree without them.')
         elif not linear:
@@ -626,7 +629,11 @@ def assess_pending_merge(root, load_config, args, report, facts, snapshot):
         blockers.append('Unmerged index stages remain.')
         return
     report['staged_tree_oid'] = compute_staged_tree_readonly(root)
-    if facts['unstaged'] or facts['untracked'] or facts['ignored']:
+    blocking_ignored = [
+        p for p in facts['ignored']
+        if not _is_safe_local_cache(root, p, (head, heads[0]))
+    ]
+    if facts['unstaged'] or facts['untracked'] or blocking_ignored:
         blockers.append('Unstaged, untracked or ignored paths require review.')
     check, code = _git(root, *GIT, *snapshot['status_options'], 'diff', '--cached', '--check',
                        '--no-ext-diff', '--no-textconv', head, '--',
@@ -636,6 +643,20 @@ def assess_pending_merge(root, load_config, args, report, facts, snapshot):
         blockers.append('Staged diff has conflict marker or whitespace diagnostics.')
     if not blockers:
         report['status'] = 'awaiting_human_confirmation'
+
+
+SAFE_LOCAL_CACHE = '.group/local/sync-discover.json'
+
+
+def _is_safe_local_cache(root, relpath, commits):
+    """Allow the tool's own disposable sync-discover cache only when absent from all merge trees."""
+    if relpath != SAFE_LOCAL_CACHE:
+        return False
+    for commit in commits:
+        entry, _ = _git(root, *GIT, 'ls-tree', '-r', '-z', commit, '--', SAFE_LOCAL_CACHE)
+        if entry:
+            return False
+    return True
 
 
 def compute_staged_tree_readonly(root):

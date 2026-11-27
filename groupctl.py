@@ -59,6 +59,8 @@ def main(argv=None):
         prog="groupctl",
         description="Group Collaboration configuration and local event helper.",
     )
+    parser.add_argument("--version", action="version", version="groupctl 0.1 (protocol 0.1)")
+    parser.add_argument("--repo", type=Path, help="Target repository directory (defaults to current working directory)")
     commands = parser.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config", help="Read group configuration")
     actions = config.add_subparsers(dest="action", required=True)
@@ -81,7 +83,8 @@ def main(argv=None):
     git = commands.add_parser("git", help="Read-only local Git inspection")
     git_actions = git.add_subparsers(dest="action", required=True)
     git_actions.add_parser("status", help="Inspect local refs without fetching (not full STATUS)")
-    commands.add_parser('status', help='Analyze local group records without fetching (not full STATUS)')
+    status_cmd = commands.add_parser('status', help='Analyze group records (offline by default; use --fetch for live remote check)')
+    status_cmd.add_argument('--fetch', action='store_true', help='Fetch origin metadata to check remote freshness and pending changes')
     sync = commands.add_parser('sync', help='Fetch and discover remote records; no integration')
     modes = sync.add_mutually_exclusive_group(required=True)
     modes.add_argument('--discover', action='store_true')
@@ -157,6 +160,7 @@ def main(argv=None):
     test.add_argument('--scope', default='current', help='current, main/canonical, or a change_id')
     test.add_argument('--isolated', action='store_true', help='Run in an isolated detached worktree')
     test.add_argument('--publish', action='store_true', help='Commit (and optionally push) the test_result event')
+    test.add_argument('--human-check', action='append', help='Concrete human verification check; repeatable')
     test.add_argument('--remote')
     test.add_argument('--expected-url')
     test.add_argument('--expected-remote-head')
@@ -236,77 +240,79 @@ def main(argv=None):
             pub.error('--work-commit requires --file and a nonblank --message')
         if args.use_existing and (args.file is not None or args.message is not None):
             pub.error('--use-existing selects the reviewed HEAD and does not accept --file or --message')
-    # Resolve from the invocation directory, never from the installed tool.
-    path = Path.cwd() / ".group" / "group.json"
+    # Resolve from --repo when provided, otherwise from the invocation directory.
+    base_dir = args.repo.resolve() if args.repo else Path.cwd()
+    path = base_dir / ".group" / "group.json"
     try:
         if args.command == 'pub':
             if args.event_commit:
-                report = event_commit(Path.cwd(), load_config, args)
+                report = event_commit(base_dir, load_config, args)
                 print(json.dumps(report, indent=2, ensure_ascii=True))
                 return int(report['result'] != 'local_event_committed')
             if args.push_work or args.push_event:
                 operation = push_event if args.push_event else push_work
-                report = operation(Path.cwd(), load_config, args)
+                report = operation(base_dir, load_config, args)
                 print(json.dumps(report, indent=2, ensure_ascii=True))
                 return int(not report['verified'])
             if not args.preflight:
-                report = work_commit(Path.cwd(), load_config, args)
+                report = work_commit(base_dir, load_config, args)
                 print(json.dumps(report, indent=2, ensure_ascii=True))
                 return int(report['result'] not in ('created', 'existing'))
-            root = repository_root(Path.cwd())
+            root = repository_root(base_dir)
             report = preflight(root, load_config(root / '.group' / 'group.json'), args.person_id)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'int':
             if args.ff_only:
-                report = fast_forward(Path.cwd(), load_config, args)
+                report = fast_forward(base_dir, load_config, args)
             elif args.prepare_merge:
-                report = prepare_merge(Path.cwd(), load_config, args)
+                report = prepare_merge(base_dir, load_config, args)
             elif args.inspect_merge:
-                report = inspect_merge(Path.cwd(), load_config, args)
+                report = inspect_merge(base_dir, load_config, args)
             elif args.commit_merge:
-                report = commit_merge(Path.cwd(), load_config, args)
+                report = commit_merge(base_dir, load_config, args)
             elif args.verify:
-                report = verify_integration(Path.cwd(), load_config, args)
+                report = verify_integration(base_dir, load_config, args)
             elif args.publish_result:
-                report = publish_integration_result(Path.cwd(), load_config, args)
+                report = publish_integration_result(base_dir, load_config, args)
             else:
-                report = int_preflight(Path.cwd(), load_config, args.person_id,
+                report = int_preflight(base_dir, load_config, args.person_id,
                                        args.change_id, args.target_branch)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'rev':
-            report = publish_review(Path.cwd(), load_config, args) if args.publish else inspect_change(Path.cwd(), load_config, args)
+            report = publish_review(base_dir, load_config, args) if args.publish else inspect_change(base_dir, load_config, args)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'final':
-            report = publish_final(Path.cwd(), load_config, args) if args.publish else prepare_final(Path.cwd(), load_config, args)
+            report = publish_final(base_dir, load_config, args) if args.publish else prepare_final(base_dir, load_config, args)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'test':
             # Stable Chinese output when redirected from Windows PowerShell.
             if hasattr(sys.stdout, 'reconfigure'):
                 sys.stdout.reconfigure(encoding='utf-8')
-            root = repository_root(Path.cwd())
+            root = repository_root(base_dir)
             return run_scoped_tests(
                 root, load_config(root / '.group' / 'group.json'), args.person_id,
                 scope=args.scope, isolated=args.isolated, publish=args.publish,
                 remote=args.remote, expected_url=args.expected_url,
                 expected_remote_head=args.expected_remote_head,
                 confirm_reviewed=args.confirm_reviewed,
+                human_checks=args.human_check,
             )
         if args.command == 'sync':
-            root = repository_root(Path.cwd())
+            root = repository_root(base_dir)
             operation = update if args.update else discover
             return operation(root, load_config(root / '.group' / 'group.json'))
         if args.command == "status":
-            root = repository_root(Path.cwd())
+            root = repository_root(base_dir)
             config = load_config(root / ".group" / "group.json")
-            report = collect_status(root, config)
+            report = collect_status(root, config, fetch=args.fetch)
             print(format_group_status(report))
             return 0
         if args.command == "git":
-            root = repository_root(Path.cwd())
+            root = repository_root(base_dir)
             config_path = root / ".group" / "group.json"
             canonical = load_config(config_path)["canonical_branch"] if config_path.exists() else "main"
             status = inspect_status(root, canonical)
@@ -320,10 +326,12 @@ def main(argv=None):
         elif args.action in ("validate", "create"):
             result = load_event(args.file)
             if args.action == "create":
-                write_event(Path.cwd(), result)
+                write_event(base_dir, result)
         elif args.action == "publish":
             event = load_event(args.file)
-            root = repository_root(Path.cwd())
+            if event['event_type'] == 'change_published':
+                raise EventError("Use 'groupctl pub' to publish change_published events with work-commit verification.")
+            root = repository_root(base_dir)
             commit_rep = commit_event_file(root, load_config, args.person_id, event)
             result = dict(commit_rep, publication='local_committed', verified=False)
             if args.remote:
@@ -338,9 +346,9 @@ def main(argv=None):
                 )
                 result.update(publication=push_rep['result'], verified=push_rep['verified'], push=push_rep)
         elif args.action == "show":
-            result = read_event(Path.cwd(), args.event_id)
+            result = read_event(base_dir, args.event_id)
         else:
-            result = list_events(Path.cwd())
+            result = list_events(base_dir)
     except (ConfigError, EventError, GitError, StatusError) as exc:
         print(f"groupctl: error: {exc}", file=sys.stderr)
         return 1

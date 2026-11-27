@@ -120,6 +120,21 @@ def _render_report(title, *, assignment_text, result_summary, canonical_branch, 
     return '\n'.join(lines)
 
 
+def _resolved_blocker_ids(known):
+    resolved = set()
+    for event in known.values():
+        if event['event_type'] != 'finding':
+            continue
+        targets = event.get('resolves_events')
+        if not isinstance(targets, list):
+            continue
+        related = set(event.get('related_events') or [])
+        for target_id in targets:
+            if isinstance(target_id, str) and target_id in related:
+                resolved.add(target_id)
+    return resolved
+
+
 def prepare_final(directory, load_config, args):
     """Synchronize-check canonical, run isolated final tests, and generate candidate.md + final_candidate."""
     report = dict(
@@ -150,7 +165,9 @@ def prepare_final(directory, load_config, args):
         known = collect_known_events(root, config['group_id'])
         changes = [e for e in known.values() if e['event_type'] == 'change_published']
         reviews = [e for e in known.values() if e['event_type'] == 'review']
-        blockers = [e for e in known.values() if e['event_type'] == 'blocker']
+        resolved_ids = _resolved_blocker_ids(known)
+        all_blockers = [e for e in known.values() if e['event_type'] == 'blocker']
+        open_blockers = [b for b in all_blockers if b['event_id'] not in resolved_ids]
 
         incorporated, pending = [], []
         for ch in sorted(changes, key=lambda e: e['change_id']):
@@ -168,7 +185,7 @@ def prepare_final(directory, load_config, args):
                         f'Unincorporated change without disposition: {ch["change_id"]}'
                     )
 
-        for blk in blockers:
+        for blk in open_blockers:
             report['unresolved_concerns'].append(
                 f'Blocker recorded ({blk["event_id"]}): {blk["summary"]}'
             )
@@ -194,7 +211,7 @@ def prepare_final(directory, load_config, args):
             dispositions=dispositions,
             test_outcome=test_outcome,
             reviews=reviews,
-            blockers=blockers,
+            blockers=open_blockers,
             limitations=limitations,
             contributors=members,
             evidence_mode=evidence_mode,
@@ -220,6 +237,9 @@ def prepare_final(directory, load_config, args):
             known_issues=limitations + report['unresolved_concerns'],
             report_sha256=report_sha256,
             unresolved_concerns=report['unresolved_concerns'],
+            known_change_ids=sorted(c['change_id'] for c in changes),
+            open_blocker_ids=sorted(b['event_id'] for b in open_blockers),
+            resolved_blocker_ids=sorted(b['event_id'] for b in all_blockers if b['event_id'] in resolved_ids),
             evidence_mode=evidence_mode,
         ))
         event_path = write_event(root, event)
@@ -234,6 +254,8 @@ def prepare_final(directory, load_config, args):
             test_outcome=test_outcome,
             incorporated_changes=[c['change_id'] for c in incorporated],
             pending_changes=[c['change_id'] for c in pending],
+            open_blockers=[b['event_id'] for b in open_blockers],
+            resolved_blockers=event['resolved_blocker_ids'],
             evidence_mode=evidence_mode,
         )
     except (EventError, GitError, OSError, StatusError, ValueError) as exc:
@@ -303,6 +325,40 @@ def publish_final(directory, load_config, args):
         current_sha256 = sha256_file(candidate_md_path)
         if candidate_event.get('report_sha256') and candidate_event['report_sha256'] != current_sha256:
             raise EventError('candidate.md changed after candidate preparation; re-run final --prepare.')
+
+        # Re-scan group events to detect new proposals or open blockers introduced after --prepare.
+        known_now = collect_known_events(root, config['group_id'])
+        if 'known_change_ids' in candidate_event:
+            prev_changes = set(candidate_event['known_change_ids'])
+            new_pending = []
+            for ch in known_now.values():
+                if ch['event_type'] == 'change_published' and ch['change_id'] not in prev_changes:
+                    try:
+                        wsha = resolve_work(root, ch['commit'], len(canon_sha))
+                        is_inc = ancestor(root, wsha, canon_sha)
+                    except (EventError, GitError):
+                        is_inc = False
+                    if not is_inc:
+                        new_pending.append(ch['change_id'])
+            if new_pending:
+                raise EventError(
+                    'New unincorporated change(s) appeared after candidate preparation; '
+                    're-run final --prepare: ' + ', '.join(sorted(new_pending))
+                )
+        if 'open_blocker_ids' in candidate_event:
+            prev_blockers = set(candidate_event['open_blocker_ids'])
+            resolved_now = _resolved_blocker_ids(known_now)
+            new_blockers = sorted(
+                e['event_id'] for e in known_now.values()
+                if e['event_type'] == 'blocker'
+                and e['event_id'] not in resolved_now
+                and e['event_id'] not in prev_blockers
+            )
+            if new_blockers:
+                raise EventError(
+                    'New open blocker(s) appeared after candidate preparation; '
+                    're-run final --prepare: ' + ', '.join(new_blockers)
+                )
 
         confirmation = _validate_confirmation(args.confirmation_file, candidate_event, current_sha256)
         if confirmation['confirmed_by'] not in member_ids:

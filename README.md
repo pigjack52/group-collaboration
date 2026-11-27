@@ -13,13 +13,15 @@
   - `groupctl.py rev --inspect --person-id <id> --change-id <C-ID>` 唯讀顯示事件宣告與真實 Git diff。
   - `groupctl.py rev --publish --person-id <id> --change-id <C-ID> --inspected-commit <SHA> --diff-inspected --verdict <accept|accept_with_changes|reject|needs_more_evidence> --summary "..." [--remote origin --expected-url <URL> --confirm-reviewed]` 發布 `review` 事件，不合併程式碼。
 - **TEST 多 Scope 隔離驗證與發布：**
-  - `groupctl.py test --person-id <id> [--scope current|main|<C-ID>] [--isolated] [--publish --remote origin --expected-url <URL> --confirm-reviewed]` 於隔離 detached worktree 執行 unittest，不污染使用者工作目錄。
-- **FINAL 群組最終化（真人確認綁定）：**
-  - `groupctl.py final --prepare --person-id <id> --result-summary "..." [--disposition C-ID=reason] [--limitation "..."] [--simulation]` 驗證 canonical 狀態、列舉未整合提案與 blockers、於隔離 worktree 跑最終測試，產出 `.group/final/candidate.md`、`report_sha256` 與 `final_candidate` 事件。
-  - `groupctl.py final --publish --person-id <id> --candidate-id <E-ID> --confirmation-file <path> --confirm-human [--allow-known-limitations] [--remote origin --expected-url <URL>]` 驗證候選 ID、canonical commit 與報告 SHA-256 綁定後，產出 `.group/final/final_report.md`、`.group/final/final.json` 與 `final_result` 事件並推送驗證。自動化測試與 Demo 確認一律標記 `evidence_mode: "simulation"`，不冒充真人批准。
-- **通用事件發布與 STATUS 下一步建議：**
-  - `groupctl.py events publish <event.json> --person-id <id> [--remote origin --expected-url <URL> --confirm-reviewed]` 可安全提交並推送驗證 `finding`、`question`、`answer`、`blocker` 等事件。
-  - `groupctl.py status` 新增 `Recommended next action:` 依 dirty、blocker、behind 與 HEAD 測試證據給出下一步建議。
+  - `groupctl.py test --person-id <id> [--scope current|main|<C-ID>] [--isolated] [--human-check "<步驟>"] [--publish --remote origin --expected-url <URL> --confirm-reviewed]` 於隔離 detached worktree 執行 unittest，不污染使用者工作目錄。
+- **FINAL 群組最終化（真人確認綁定與漂移防護）：**
+  - `groupctl.py final --prepare --person-id <id> --result-summary "..." [--disposition C-ID=reason] [--limitation "..."] [--simulation]` 驗證 canonical 狀態、列舉未整合提案與未解 blockers（支援辨識經 `finding.resolves_events` 解除之 blocker）、於隔離 worktree 跑最終測試，產出 `.group/final/candidate.md`、`report_sha256` 與 `final_candidate` 事件。
+  - `groupctl.py final --publish --person-id <id> --candidate-id <E-ID> --confirmation-file <path> --confirm-human [--allow-known-limitations] [--remote origin --expected-url <URL>]` 驗證候選 ID、canonical commit、報告 SHA-256，並重掃確認期間無新增未整合提案或新 open blocker 後，產出 `.group/final/final_report.md`、`.group/final/final.json` 與 `final_result` 事件並推送驗證。自動化測試與 Demo 確認一律標記 `evidence_mode: "simulation"`，不冒充真人批准。
+- **通用事件發布、遠端新鮮度 STATUS 與全域 `--repo`：**
+  - `groupctl.py --version` 與 `groupctl.py --repo /path/to/team-repo <command> ...` 支援將工具目錄與目標團隊專案分離操作。
+  - `groupctl.py events publish <event.json> --person-id <id> [--remote origin --expected-url <URL> --confirm-reviewed]` 可安全提交並推送驗證 `finding`、`question`、`answer`、`blocker` 等事件（拒絕繞過 `pub` 直接發布 `change_published`）。
+  - `groupctl.py status [--fetch]` 預設唯讀離線；加上 `--fetch` 可安全檢查遠端新鮮度與未納入 canonical 的 pending changes，並輸出 `Recommended next action:`。
+- **需求矩陣與限制文件：** 見 [docs/REQUIREMENTS_MATRIX.md](docs/REQUIREMENTS_MATRIX.md) 與 [docs/PROVENANCE_AND_LIMITATIONS.md](docs/PROVENANCE_AND_LIMITATIONS.md)。
 
 ## 步驟 3-9C-4：INT 唯讀衝突診斷與重查
 

@@ -57,13 +57,51 @@ def read_members(root):
     return members
 
 
-def collect_status(root, config):
-    """Collect validated inputs without writing or fetching."""
+def collect_status(root, config, *, fetch=False):
+    """Collect validated inputs without writing; optionally fetch remote metadata when fetch=True."""
     root = Path(root)
     for field in ("group_id", "canonical_branch"):
         if not isinstance(config.get(field), str) or not config[field].strip():
             raise StatusError(f"{root / '.group/group.json'}: invalid {field}")
+    remote_fetched = False
+    remote_pending_changes = []
+    if fetch:
+        import os
+        from group_git import _git
+        from group_sync import event_entries, read_discovered_event
+        pre = inspect_status(root, config["canonical_branch"], allow_missing_upstream=True)
+        if pre.origin_exists:
+            _git(root, '-c', 'core.hooksPath=' + os.devnull, 'fetch',
+                 '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head',
+                 '--prune', '--no-prune-tags', '--refmap=', 'origin',
+                 '+refs/heads/*:refs/remotes/origin/*')
+            remote_fetched = True
     git = inspect_status(root, config["canonical_branch"])
+    if remote_fetched:
+        from group_git import _git
+        from group_sync import event_entries, read_discovered_event
+        raw_refs, _ = _git(root, 'for-each-ref', '--format=%(refname) %(objectname)',
+                           'refs/remotes/origin/')
+        seen_changes = {}
+        for line in raw_refs.splitlines():
+            if line.startswith('refs/remotes/origin/HEAD '):
+                continue
+            ref, tip = line.split(' ', 1)
+            for path, mode, kind, blob in event_entries(root, tip):
+                try:
+                    ev = read_discovered_event(root, path, mode, kind, blob, config["group_id"])
+                except Exception:
+                    continue
+                if ev['event_type'] == 'change_published':
+                    seen_changes.setdefault(ev['change_id'], ev)
+        for cid, ev in sorted(seen_changes.items()):
+            incorporated = False
+            if git.canonical_commit:
+                _, code = _git(root, 'merge-base', '--is-ancestor', ev['commit'],
+                               git.canonical_commit, allowed=(0, 1, 128))
+                incorporated = code == 0
+            if not incorporated:
+                remote_pending_changes.append(ev)
     members = read_members(root)
     events = []
     for path in _files(root / ".group" / "events"):
@@ -95,7 +133,8 @@ def collect_status(root, config):
         change = event.get("change_id", event.get("blocking_change_id"))
         if change and event["event_type"] != "change_published" and change not in changes:
             warnings.append(f"{source}: change {change} has no change_published record")
-    return dict(config=config, git=git, members=members, events=events, warnings=warnings)
+    return dict(config=config, git=git, members=members, events=events, warnings=warnings,
+                remote_fetched=remote_fetched, remote_pending_changes=remote_pending_changes)
 
 
 def _quoted(value):
@@ -291,6 +330,17 @@ def format_group_status(report):
         "Test results apply only to their recorded commit/scope; related_events does not extend coverage.",
         "Event order does not establish latest progress; conflicting records are retained.",
     ]
+    if report.get("remote_fetched"):
+        lines.append("Remote metadata: fetched from origin (live snapshot at command time)")
+        pending = report.get("remote_pending_changes") or []
+        if pending:
+            summary = ", ".join(
+                f"{ev['change_id']} ({ev['person_id']} @ {ev['commit'][:12]})"
+                for ev in pending
+            )
+            lines.append("Remote pending changes (not in canonical): " + summary)
+        else:
+            lines.append("Remote pending changes (not in canonical): (none)")
     lines.append("Recommended next action: " + recommended_next_action(report))
     lines.extend("WARNING: " + warning for warning in report["warnings"])
     return "\n".join(lines)
@@ -306,6 +356,10 @@ def recommended_next_action(report):
         return f"Resolve or address recorded blocker(s): {', '.join(e['event_id'] for e in blockers)}."
     if git.behind and git.behind > 0:
         return "Run SYNC to incorporate remote updates safely."
+    pending = report.get("remote_pending_changes") or []
+    if pending:
+        ids = ", ".join(ev["change_id"] for ev in pending)
+        return f"Review or integrate pending remote change(s): {ids}."
     tests = [TestEvidence(e) for e in events if e["event_type"] == "test_result"]
     head_tested = any(
         t.event["commit"] == git.head and t.attribution is True
