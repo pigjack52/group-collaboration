@@ -214,7 +214,7 @@ class PubIntEndToEndTests(TestCase):
         evidence = self.review(head)
         self.integrate('--prepare-merge', evidence, 'conflicted')
         self.inspect(evidence, head, 'conflicted', sorted(PATHS))
-        for path, remaining in zip(PATHS, ([PATHS[1]], []), strict=True):
+        for path, remaining in zip(PATHS, ([PATHS[1]], [])):
             self.assertIn(b'<<<<<<<', (self.root / path).read_bytes())
             (self.root / path).write_bytes(b'manually combined content\n')
             self.git('add', '--', path)

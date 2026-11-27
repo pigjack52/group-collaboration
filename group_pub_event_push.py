@@ -29,9 +29,12 @@ def inspect_event_commit(repository, args, group_id):
     diff, _ = _git(repository, '--no-replace-objects', 'diff-tree', '--no-commit-id',
                    '-r', '-t', '--raw', '--no-abbrev', '--no-renames', '--ignore-submodules=none',
                    '-z', work, head, '--')
-    fields = iter(diff.split('\0')[:-1])
+    tokens = diff.split('\0')[:-1]
+    if len(tokens) % 2 != 0:
+        raise EventError('Unexpected git diff-tree output format.')
+    fields = iter(tokens)
     files = []
-    for metadata, path in zip(fields, fields, strict=True):
+    for metadata, path in zip(fields, fields):
         old_mode, mode, old_blob, blob, change = metadata.split()
         if (path in ('.group', EVENTS) and mode == '040000'
                 and old_mode in (':000000', ':040000')):

@@ -456,8 +456,11 @@ def file_fingerprint(path):
     if stat.S_ISLNK(info.st_mode):
         return info.st_mode, os.readlink(path)
     if stat.S_ISREG(info.st_mode):
+        digest = hashlib.sha256()
         with path.open('rb') as stream:
-            return info.st_mode, hashlib.file_digest(stream, 'sha256').hexdigest()
+            for chunk in iter(lambda: stream.read(65536), b''):
+                digest.update(chunk)
+        return info.st_mode, digest.hexdigest()
     return info.st_mode, info.st_mtime_ns
 
 
@@ -471,7 +474,10 @@ def inspect_merge_snapshot(root):
     metadata_names = ('MERGE_MSG', 'MERGE_MODE', 'ORIG_HEAD', 'AUTO_MERGE')
     names = dict.fromkeys((*operation_names, *metadata_names, 'index', 'groupctl-int.lock'))
     paths, _ = _git(root, 'rev-parse', *(arg for name in names for arg in ('--git-path', name)))
-    locations = {name: root / path for name, path in zip(names, paths.split('\n'), strict=True)}
+    path_lines = paths.split('\n')
+    if len(path_lines) != len(names):
+        raise GitError('Unexpected git rev-parse --git-path output length.')
+    locations = {name: root / path for name, path in zip(names, path_lines)}
     try:
         marker = locations['MERGE_HEAD'].read_bytes()
     except FileNotFoundError:
@@ -619,6 +625,7 @@ def assess_pending_merge(root, load_config, args, report, facts, snapshot):
         report['status'] = 'conflicted'
         blockers.append('Unmerged index stages remain.')
         return
+    report['staged_tree_oid'] = compute_staged_tree_readonly(root)
     if facts['unstaged'] or facts['untracked'] or facts['ignored']:
         blockers.append('Unstaged, untracked or ignored paths require review.')
     check, code = _git(root, *GIT, *snapshot['status_options'], 'diff', '--cached', '--check',
@@ -629,6 +636,27 @@ def assess_pending_merge(root, load_config, args, report, facts, snapshot):
         blockers.append('Staged diff has conflict marker or whitespace diagnostics.')
     if not blockers:
         report['status'] = 'awaiting_human_confirmation'
+
+
+def compute_staged_tree_readonly(root):
+    """Compute the exact Git tree OID for the current index without writing to the repository."""
+    import shutil
+    from tempfile import TemporaryDirectory
+    index_path, _ = _git(root, 'rev-parse', '--git-path', 'index')
+    objects_path, _ = _git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+    with TemporaryDirectory(prefix='groupctl-tree-') as temporary:
+        temp_dir = Path(temporary)
+        temp_index = temp_dir / 'index'
+        temp_objects = temp_dir / 'objects'
+        temp_objects.mkdir()
+        shutil.copy2(root / index_path, temp_index)
+        env = {
+            'GIT_INDEX_FILE': str(temp_index),
+            'GIT_OBJECT_DIRECTORY': str(temp_objects),
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects_path,
+        }
+        tree, _ = _git(root, *GIT, 'write-tree', env_overrides=env)
+        return tree
 
 
 def inspect_merge(directory, load_config, args):

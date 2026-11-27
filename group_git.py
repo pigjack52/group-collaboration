@@ -1,4 +1,5 @@
 """Read-only Git snapshots using existing local refs; never contacts a remote."""
+from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
