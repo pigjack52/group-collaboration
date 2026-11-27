@@ -11,7 +11,11 @@ from group_status import StatusError, collect_status, format_group_status
 from group_sync import discover
 from group_update import update
 from group_int import fast_forward, inspect_merge, prepare_merge, preflight as int_preflight
-from group_test import run_tests
+from group_int_finish import commit_merge, publish_integration_result, verify_integration
+from group_rev import inspect_change, publish_review
+from group_final import prepare_final, publish_final
+from group_event_publish import commit_event_file, push_and_verify_event
+from group_test import run_scoped_tests, run_tests
 from group_pub import preflight
 from group_pub_commit import work_commit
 from group_pub_push import push_work
@@ -67,6 +71,13 @@ def main(argv=None):
     show = event_actions.add_parser("show", help="Read an event by ID")
     show.add_argument("event_id")
     event_actions.add_parser("list", help="List validated events in filename order")
+    ev_pub = event_actions.add_parser("publish", help="Commit and optionally push a validated event JSON")
+    ev_pub.add_argument("file", type=Path)
+    ev_pub.add_argument("--person-id", required=True)
+    ev_pub.add_argument("--remote")
+    ev_pub.add_argument("--expected-url")
+    ev_pub.add_argument("--expected-remote-head")
+    ev_pub.add_argument("--confirm-reviewed", action="store_true")
     git = commands.add_parser("git", help="Read-only local Git inspection")
     git_actions = git.add_subparsers(dest="action", required=True)
     git_actions.add_parser("status", help="Inspect local refs without fetching (not full STATUS)")
@@ -81,6 +92,9 @@ def main(argv=None):
     modes.add_argument('--ff-only', action='store_true')
     modes.add_argument('--prepare-merge', action='store_true')
     modes.add_argument('--inspect-merge', action='store_true', help='Diagnose a pending merge without writing')
+    modes.add_argument('--commit-merge', action='store_true', help='Commit a reviewed pending merge with staged tree verification')
+    modes.add_argument('--verify', action='store_true', help='Run Level 1 Git and Level 2 isolated test checks on an integration commit')
+    modes.add_argument('--publish-result', action='store_true', help='Create, commit, and optionally push an integration_result event')
     integration.add_argument('--person-id', required=True)
     integration.add_argument('--change-id', required=True)
     integration.add_argument('--target-branch', required=True, help='Exact local target branch name')
@@ -91,10 +105,62 @@ def main(argv=None):
     integration.add_argument('--expected-source-ref')
     integration.add_argument('--expected-source-tip')
     integration.add_argument('--expected-incoming', help='Comma-separated full T..A SHAs, or none')
+    integration.add_argument('--expected-tree', help='Reviewed staged tree OID from --inspect-merge')
+    integration.add_argument('--message', help='Merge commit message for --commit-merge')
+    integration.add_argument('--merge-commit', help='Exact integration commit SHA for --verify or --publish-result')
+    integration.add_argument('--result', choices=('success', 'failed', 'needs_human'))
+    integration.add_argument('--build', dest='build_status', default='not_applicable')
+    integration.add_argument('--tests', dest='tests_status')
+    integration.add_argument('--semantic-review', dest='semantic_review')
+    integration.add_argument('--summary')
+    integration.add_argument('--conflict', action='append', help='Conflicted file path; repeat for multiple files')
+    integration.add_argument('--conflict-resolution-summary')
+    integration.add_argument('--remote')
+    integration.add_argument('--expected-url')
+    integration.add_argument('--expected-remote-head')
     integration.add_argument('--confirm-reviewed', action='store_true')
     integration.add_argument('--confirm-unproposed', action='store_true')
-    test = commands.add_parser('test', help='Test current clean HEAD; create a local unpublished event')
+    rev = commands.add_parser('rev', help='Inspect a published change and publish a review event (never merges)')
+    rev_modes = rev.add_mutually_exclusive_group(required=True)
+    rev_modes.add_argument('--inspect', action='store_true')
+    rev_modes.add_argument('--publish', action='store_true')
+    rev.add_argument('--person-id', required=True)
+    rev.add_argument('--change-id', required=True)
+    rev.add_argument('--inspected-commit')
+    rev.add_argument('--diff-inspected', action='store_true')
+    rev.add_argument('--verdict', choices=('accept', 'accept_with_changes', 'reject', 'needs_more_evidence'))
+    rev.add_argument('--summary')
+    rev.add_argument('--issue', action='append')
+    rev.add_argument('--test-run', action='append')
+    rev.add_argument('--remote')
+    rev.add_argument('--expected-url')
+    rev.add_argument('--expected-remote-head')
+    rev.add_argument('--confirm-reviewed', action='store_true')
+    final = commands.add_parser('final', help='Prepare and publish human-confirmed group finalization')
+    final_modes = final.add_mutually_exclusive_group(required=True)
+    final_modes.add_argument('--prepare', action='store_true')
+    final_modes.add_argument('--publish', action='store_true')
+    final.add_argument('--person-id', required=True)
+    final.add_argument('--result-summary')
+    final.add_argument('--disposition', action='append', help='CHANGE_ID=reason for unincorporated change')
+    final.add_argument('--limitation', action='append')
+    final.add_argument('--simulation', action='store_true', help='Explicitly mark generated candidate as simulation')
+    final.add_argument('--candidate-id')
+    final.add_argument('--confirmation-file', type=Path)
+    final.add_argument('--confirm-human', action='store_true')
+    final.add_argument('--allow-known-limitations', action='store_true')
+    final.add_argument('--remote')
+    final.add_argument('--expected-url')
+    final.add_argument('--expected-remote-head')
+    test = commands.add_parser('test', help='Run unittest validation for current, main, or change_id scope')
     test.add_argument('--person-id', required=True, help='Explicit configured member person_id')
+    test.add_argument('--scope', default='current', help='current, main/canonical, or a change_id')
+    test.add_argument('--isolated', action='store_true', help='Run in an isolated detached worktree')
+    test.add_argument('--publish', action='store_true', help='Commit (and optionally push) the test_result event')
+    test.add_argument('--remote')
+    test.add_argument('--expected-url')
+    test.add_argument('--expected-remote-head')
+    test.add_argument('--confirm-reviewed', action='store_true')
     pub = commands.add_parser('pub', help='Publication preflight, commit and push work or events')
     modes = pub.add_mutually_exclusive_group(required=True)
     modes.add_argument('--preflight', action='store_true')
@@ -121,13 +187,18 @@ def main(argv=None):
         reviewed = (args.expected_head, args.work_sha, args.expected_event_id,
                     args.expected_event_blob, args.expected_source_ref,
                     args.expected_source_tip, args.expected_incoming)
-        if (args.ff_only or args.prepare_merge) and not (all(reviewed) and args.confirm_reviewed):
-            mode = '--ff-only' if args.ff_only else '--prepare-merge'
+        if (args.ff_only or args.prepare_merge or args.commit_merge) and not (all(reviewed) and args.confirm_reviewed):
+            mode = '--ff-only' if args.ff_only else '--prepare-merge' if args.prepare_merge else '--commit-merge'
             integration.error(f'{mode} requires all reviewed evidence options and --confirm-reviewed')
+        if args.commit_merge and not (args.expected_tree and args.message and args.message.strip()):
+            integration.error('--commit-merge requires --expected-tree and a nonblank --message')
+        if args.publish_result and not (args.merge_commit and args.result and args.tests_status
+                                        and args.semantic_review and args.summary and args.summary.strip()):
+            integration.error('--publish-result requires --merge-commit, --result, --tests, --semantic-review and --summary')
         has_evidence = (any(value is not None for value in reviewed)
                         or args.confirm_reviewed or args.confirm_unproposed)
         if args.preflight and has_evidence:
-            integration.error('Reviewed evidence options require --ff-only, --prepare-merge or --inspect-merge')
+            integration.error('Reviewed evidence options require --ff-only, --prepare-merge, --inspect-merge or --commit-merge')
         if args.inspect_merge and has_evidence:
             if not (all(reviewed) and args.confirm_reviewed):
                 integration.error('--inspect-merge requires the complete reviewed evidence or none')
@@ -193,9 +264,23 @@ def main(argv=None):
                 report = prepare_merge(Path.cwd(), load_config, args)
             elif args.inspect_merge:
                 report = inspect_merge(Path.cwd(), load_config, args)
+            elif args.commit_merge:
+                report = commit_merge(Path.cwd(), load_config, args)
+            elif args.verify:
+                report = verify_integration(Path.cwd(), load_config, args)
+            elif args.publish_result:
+                report = publish_integration_result(Path.cwd(), load_config, args)
             else:
                 report = int_preflight(Path.cwd(), load_config, args.person_id,
                                        args.change_id, args.target_branch)
+            print(json.dumps(report, indent=2, ensure_ascii=True))
+            return int(bool(report['blockers']))
+        if args.command == 'rev':
+            report = publish_review(Path.cwd(), load_config, args) if args.publish else inspect_change(Path.cwd(), load_config, args)
+            print(json.dumps(report, indent=2, ensure_ascii=True))
+            return int(bool(report['blockers']))
+        if args.command == 'final':
+            report = publish_final(Path.cwd(), load_config, args) if args.publish else prepare_final(Path.cwd(), load_config, args)
             print(json.dumps(report, indent=2, ensure_ascii=True))
             return int(bool(report['blockers']))
         if args.command == 'test':
@@ -203,7 +288,13 @@ def main(argv=None):
             if hasattr(sys.stdout, 'reconfigure'):
                 sys.stdout.reconfigure(encoding='utf-8')
             root = repository_root(Path.cwd())
-            return run_tests(root, load_config(root / '.group' / 'group.json'), args.person_id)
+            return run_scoped_tests(
+                root, load_config(root / '.group' / 'group.json'), args.person_id,
+                scope=args.scope, isolated=args.isolated, publish=args.publish,
+                remote=args.remote, expected_url=args.expected_url,
+                expected_remote_head=args.expected_remote_head,
+                confirm_reviewed=args.confirm_reviewed,
+            )
         if args.command == 'sync':
             root = repository_root(Path.cwd())
             operation = update if args.update else discover
@@ -230,6 +321,22 @@ def main(argv=None):
             result = load_event(args.file)
             if args.action == "create":
                 write_event(Path.cwd(), result)
+        elif args.action == "publish":
+            event = load_event(args.file)
+            root = repository_root(Path.cwd())
+            commit_rep = commit_event_file(root, load_config, args.person_id, event)
+            result = dict(commit_rep, publication='local_committed', verified=False)
+            if args.remote:
+                if not (args.expected_url and args.confirm_reviewed):
+                    raise GitError('events publish --remote requires --expected-url and --confirm-reviewed.')
+                push_rep = push_and_verify_event(
+                    root, branch=commit_rep['branch'], commit=commit_rep['commit'],
+                    parent=commit_rep['parent'], event_id=event['event_id'],
+                    event_path=commit_rep['event_path'], event_blob=commit_rep['event_blob'],
+                    remote=args.remote, expected_url=args.expected_url,
+                    expected_remote_head=args.expected_remote_head,
+                )
+                result.update(publication=push_rep['result'], verified=push_rep['verified'], push=push_rep)
         elif args.action == "show":
             result = read_event(Path.cwd(), args.event_id)
         else:

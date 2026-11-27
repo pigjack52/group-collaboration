@@ -291,5 +291,29 @@ def format_group_status(report):
         "Test results apply only to their recorded commit/scope; related_events does not extend coverage.",
         "Event order does not establish latest progress; conflicting records are retained.",
     ]
+    lines.append("Recommended next action: " + recommended_next_action(report))
     lines.extend("WARNING: " + warning for warning in report["warnings"])
     return "\n".join(lines)
+
+
+def recommended_next_action(report):
+    git = report["git"]
+    events = report["events"]
+    if not git.clean:
+        return "Inspect and protect uncommitted local changes before syncing or publishing."
+    blockers = [e for e in events if e["event_type"] == "blocker"]
+    if blockers:
+        return f"Resolve or address recorded blocker(s): {', '.join(e['event_id'] for e in blockers)}."
+    if git.behind and git.behind > 0:
+        return "Run SYNC to incorporate remote updates safely."
+    tests = [TestEvidence(e) for e in events if e["event_type"] == "test_result"]
+    head_tested = any(
+        t.event["commit"] == git.head and t.attribution is True
+        and t.event["automated_result"] == "pass" and t.supports_pass()
+        for t in tests
+    )
+    if not head_tested:
+        return "Run TEST on the current HEAD to establish attributable test evidence."
+    if git.branch and git.branch.startswith("people/"):
+        return "Review changes and run PUB when ready, or SYNC to check teammate updates."
+    return "Run SYNC to check remote state, or FINAL when canonical work is ready."

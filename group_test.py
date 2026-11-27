@@ -366,6 +366,131 @@ def run_tests(root, config, person_id):
     return 0 if event['automated_result'] == 'pass' else 1
 
 
+def run_scoped_tests(root, config, person_id, scope='current', *, isolated=False,
+                     publish=False, remote=None, expected_url=None,
+                     expected_remote_head=None, confirm_reviewed=False):
+    """Run TEST for current, main/canonical, or <change_id> scope using an isolated worktree."""
+    if scope in ('current', 'current_branch') and not isolated and not publish:
+        return run_tests(root, config, person_id)
+
+    from group_event_publish import (
+        collect_known_events, commit_event_file, new_event_id, push_and_verify_event, utc_now,
+    )
+    from group_int import resolve_work
+    from group_int_finish import run_isolated_unittest
+    from groupctl import load_config
+
+    root = Path(root)
+    if config.get('protocol_version') != '0.1':
+        raise EventError('Unsupported configuration protocol_version')
+    if person_id not in {m['person_id'] for m in read_members(root)}:
+        raise EventError('person_id is not a configured group member')
+
+    canonical = config['canonical_branch']
+    state = inspect_status(root, canonical, allow_missing_upstream=True)
+    related = []
+    source_ref = None
+    recorded_branch = state.branch
+
+    if scope in ('current', 'current_branch'):
+        if not state.branch:
+            raise GitError('Detached HEAD refused; a current branch is required')
+        target_sha = state.head
+        event_scope = 'current_branch'
+        source_ref = 'refs/heads/' + state.branch
+    elif scope in ('main', 'canonical', canonical):
+        if not state.canonical_commit:
+            raise GitError(f'Canonical branch {canonical!r} is unavailable locally.')
+        target_sha = state.canonical_commit
+        event_scope = 'canonical'
+        source_ref = state.canonical_ref
+        recorded_branch = canonical
+    else:
+        known = collect_known_events(root, config['group_id'])
+        matches = [e for e in known.values()
+                   if e['event_type'] == 'change_published'
+                   and e['change_id'].casefold() == scope.casefold()]
+        if not matches:
+            raise EventError(f'Unknown TEST scope or change_id not found: {scope}')
+        if len(matches) > 1:
+            raise EventError(f'Conflicting change_published events for {scope}')
+        ch = matches[0]
+        target_sha = resolve_work(root, ch['commit'], len(state.head))
+        event_scope = ch['change_id']
+        source_ref = 'refs/remotes/origin/' + ch['branch']
+        recorded_branch = ch['branch']
+        related = [ch['event_id']]
+
+    outcome = run_isolated_unittest(root, target_sha)
+    now, created_at = utc_now()
+    event = validate_event(dict(
+        protocol_version='0.1',
+        event_id=new_event_id(person_id, now),
+        event_type='test_result',
+        group_id=config['group_id'],
+        person_id=person_id,
+        created_at=created_at,
+        related_events=related,
+        scope=event_scope,
+        commit=target_sha,
+        commands=outcome['commands'],
+        automated_result=outcome['automated_result'],
+        passed=outcome['passed'],
+        failed=outcome['failed'],
+        skipped=outcome['skipped'],
+        human_checks_required=[],
+        summary=f'Isolated worktree unittest ({event_scope} @ {target_sha[:12]}): {outcome["summary"]}',
+        execution=dict(
+            branch=recorded_branch,
+            source_ref=source_ref,
+            isolated_worktree=True,
+            state_verified=True,
+            counts_available=outcome['automated_result'] != 'not_available',
+            ran=outcome['ran'],
+            counts=dict(
+                status='observed' if outcome['automated_result'] != 'not_available' else 'unavailable',
+                ran=outcome['ran'], passed=outcome['passed'],
+                failed=outcome['failed'], skipped=outcome['skipped'],
+            ),
+            semantic_review='not_performed',
+        ),
+    ))
+
+    output_report = dict(event=event, publication='local_unpublished', verified=False)
+    if publish:
+        commit_rep = commit_event_file(
+            root, load_config, person_id, event,
+            message=f'Record test_result ({event_scope}: {outcome["automated_result"]})',
+            check_related=True,
+        )
+        output_report.update(
+            publication='local_committed',
+            event_commit=commit_rep['commit'],
+            event_path=commit_rep['event_path'],
+        )
+        if remote:
+            if not (expected_url and confirm_reviewed):
+                raise GitError('Pushing test_result requires --remote, --expected-url, and --confirm-reviewed.')
+            push_rep = push_and_verify_event(
+                root, branch=commit_rep['branch'], commit=commit_rep['commit'],
+                parent=commit_rep['parent'], event_id=event['event_id'],
+                event_path=commit_rep['event_path'], event_blob=commit_rep['event_blob'],
+                remote=remote, expected_url=expected_url,
+                expected_remote_head=expected_remote_head,
+            )
+            output_report.update(
+                publication=push_rep['result'],
+                verified=push_rep['verified'],
+                push=push_rep,
+            )
+    else:
+        path = write_event(root, event)
+        output_report['event_path'] = str(path.relative_to(root).as_posix())
+
+    print(json.dumps(output_report, ensure_ascii=True, indent=2))
+    return 0 if outcome['automated_result'] == 'pass' and (not remote or output_report['verified']) else 1
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 3 or sys.argv[1] != '--unittest-runner':
         sys.exit('Internal fixed unittest runner; use groupctl test --person-id ID')
