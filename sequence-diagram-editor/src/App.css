@@ -1,0 +1,496 @@
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 32px;
+  gap: 20px;
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.app-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.phase-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1d4ed8;
+  background-color: #dbeafe;
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin-bottom: 6px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.diagram-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+  color: #475569;
+  flex-wrap: wrap;
+}
+
+.diagram-stats span {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.auto-layout-btn {
+  appearance: none;
+  border: 1px solid #1d4ed8;
+  background-color: #2563eb;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.auto-layout-btn:hover {
+  background-color: #1d4ed8;
+}
+
+.toolbar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.save-layout-btn {
+  appearance: none;
+  border: 1px solid #047857;
+  background-color: #059669;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.save-layout-btn:hover {
+  background-color: #047857;
+}
+
+.reset-layout-btn {
+  appearance: none;
+  border: 1px solid #cbd5e1;
+  background-color: #ffffff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.reset-layout-btn:hover {
+  background-color: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.storage-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #475569;
+}
+
+.layout-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: #475569;
+  padding: 0 4px;
+}
+
+.canvas-container {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+  overflow-x: auto;
+}
+
+.sd-svg {
+  display: block;
+  min-width: 760px;
+  max-height: 75vh;
+  user-select: none;
+}
+
+.sd-svg.is-dragging-x {
+  cursor: grabbing;
+}
+
+.sd-svg.is-dragging-y {
+  cursor: ns-resize;
+}
+
+.sd-svg.is-drawing {
+  cursor: crosshair;
+}
+
+.sd-canvas-wrapper {
+  position: relative;
+}
+
+.sd-draw-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background-color: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1e3a8a;
+}
+
+.sd-draw-cancel {
+  appearance: none;
+  border: 1px solid #93c5fd;
+  background: #ffffff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.sd-draw-cancel:hover {
+  background: #dbeafe;
+}
+
+.sd-lifeline-header {
+  cursor: grab;
+}
+
+.sd-lifeline-header.is-active {
+  cursor: grabbing;
+}
+
+.sd-message {
+  cursor: ns-resize;
+}
+
+.sd-message.is-active {
+  cursor: ns-resize;
+}
+
+.sd-fragment.is-editable {
+  cursor: move;
+}
+
+.sd-resize-handle.handle-nw,
+.sd-resize-handle.handle-se {
+  cursor: nwse-resize;
+}
+
+.sd-resize-handle.handle-ne,
+.sd-resize-handle.handle-sw {
+  cursor: nesw-resize;
+}
+
+.sd-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 188px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sd-context-menu-item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #0f172a;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sd-context-menu-item:hover {
+  background: #f1f5f9;
+  color: #1d4ed8;
+}
+
+.sd-fragment-badge-btn {
+  cursor: pointer;
+}
+
+.sd-fragment-badge-btn:hover path {
+  filter: brightness(0.95);
+}
+
+.sd-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.sd-modal {
+  width: 100%;
+  max-width: 460px;
+  background: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.22);
+  overflow: hidden;
+}
+
+.sd-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.sd-modal-type-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-bottom: 6px;
+}
+
+.sd-modal-type-badge.type-ignore {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.sd-modal-type-badge.type-consider {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.sd-modal-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.sd-modal-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.sd-modal-close-icon {
+  appearance: none;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  color: #64748b;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.sd-modal-close-icon:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.sd-modal-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sd-modal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sd-modal-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.sd-modal-empty {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.sd-interaction-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.sd-interaction-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.sd-remove-btn {
+  appearance: none;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.sd-remove-btn:hover {
+  background: #fee2e2;
+}
+
+.sd-modal-row {
+  display: flex;
+  gap: 8px;
+}
+
+.sd-modal-select,
+.sd-modal-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #0f172a;
+  background: #ffffff;
+}
+
+.sd-secondary-btn {
+  appearance: none;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sd-secondary-btn:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.sd-secondary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sd-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.sd-cancel-btn {
+  appearance: none;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sd-cancel-btn:hover {
+  background: #f1f5f9;
+}
+
+.sd-save-btn {
+  appearance: none;
+  border: 1px solid #1d4ed8;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sd-save-btn:hover {
+  background: #1d4ed8;
+}
